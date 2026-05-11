@@ -98,7 +98,7 @@ def _parse_ext_filter(text: str) -> set[str] | None:
 
 
 class FileFilterProxy(QSortFilterProxyModel):
-    """按扩展名、大小、名称子串筛选当前扫描结果。"""
+    """按扩展名、大小、名称子串、修改时间范围筛选当前扫描结果。"""
 
     def __init__(self) -> None:
         super().__init__()
@@ -106,6 +106,8 @@ class FileFilterProxy(QSortFilterProxyModel):
         self._min_size: int | None = None
         self._max_size: int | None = None
         self._name_sub: str = ""
+        self._min_mtime: float | None = None
+        self._max_mtime: float | None = None
 
     def set_filters(
         self,
@@ -113,11 +115,15 @@ class FileFilterProxy(QSortFilterProxyModel):
         min_size: int | None,
         max_size: int | None,
         name_sub: str,
+        min_mtime: float | None = None,
+        max_mtime: float | None = None,
     ) -> None:
         self._exts = _parse_ext_filter(ext_text)
         self._min_size = min_size
         self._max_size = max_size
         self._name_sub = name_sub.strip().lower()
+        self._min_mtime = min_mtime
+        self._max_mtime = max_mtime
         self.invalidateFilter()
 
     def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:  # noqa: N802
@@ -141,6 +147,11 @@ class FileFilterProxy(QSortFilterProxyModel):
         if self._max_size is not None and size > self._max_size:
             return False
         if self._name_sub and self._name_sub not in name:
+            return False
+        mtime = float(model.data(idx, ROLE_MTIME) or 0)
+        if self._min_mtime is not None and mtime < self._min_mtime:
+            return False
+        if self._max_mtime is not None and mtime > self._max_mtime:
             return False
         return True
 

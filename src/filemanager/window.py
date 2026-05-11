@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QItemSelection
-from PySide6.QtGui import QAction
+from PySide6.QtCore import QDateTime, Qt, QItemSelection
+from PySide6.QtGui import QAction, QFontDatabase, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QDateTimeEdit,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSplitter,
+    QStackedWidget,
     QStatusBar,
     QTableView,
     QToolBar,
@@ -30,6 +32,11 @@ from filemanager.profile import summarize_directory
 from filemanager.scanner import ScanThread
 from filemanager.table_model import ROLE_PATH, FileFilterProxy, FileTableModel
 
+_PREVIEW_MAX_TEXT_BYTES = 512 * 1024
+_PREVIEW_HEX_BYTES = 4096
+_PREVIEW_IMAGE_MAX_EDGE = 480
+_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"})
+
 
 def _parse_mb(s: str) -> int | None:
     s = s.strip()
@@ -40,6 +47,27 @@ def _parse_mb(s: str) -> int | None:
     except ValueError:
         return None
     return int(v * 1024 * 1024)
+
+
+def _is_probably_text(sample: bytes) -> bool:
+    if not sample:
+        return True
+    if b"\x00" in sample[:8192]:
+        return False
+    chunk = sample[:8192]
+    printable = sum(1 for b in chunk if 32 <= b < 127 or b in (9, 10, 13))
+    return printable / len(chunk) >= 0.85
+
+
+def _format_hex_preview(data: bytes, limit: int) -> str:
+    chunk = data[:limit]
+    lines: list[str] = []
+    for i in range(0, len(chunk), 16):
+        part = chunk[i : i + 16]
+        hx = " ".join(f"{b:02x}" for b in part)
+        asc = "".join(chr(b) if 32 <= b < 127 else "." for b in part)
+        lines.append(f"{i:08x}  {hx:<47}  {asc}")
+    return "\n".join(lines)
 
 
 class MainWindow(QMainWindow):
@@ -98,6 +126,24 @@ class MainWindow(QMainWindow):
         h_sz.addWidget(self._filt_max_mb)
         fl.addRow("大小 (MB):", h_sz)
         fl.addRow("名称:", self._filt_name)
+        h_mt = QHBoxLayout()
+        self._filt_mtime_from_en = QCheckBox("从")
+        self._filt_mtime_from = QDateTimeEdit(QDateTime.currentDateTime())
+        self._filt_mtime_from.setCalendarPopup(True)
+        self._filt_mtime_from.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self._filt_mtime_from.setEnabled(False)
+        self._filt_mtime_from_en.toggled.connect(self._filt_mtime_from.setEnabled)
+        self._filt_mtime_to_en = QCheckBox("至")
+        self._filt_mtime_to = QDateTimeEdit(QDateTime.currentDateTime())
+        self._filt_mtime_to.setCalendarPopup(True)
+        self._filt_mtime_to.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self._filt_mtime_to.setEnabled(False)
+        self._filt_mtime_to_en.toggled.connect(self._filt_mtime_to.setEnabled)
+        h_mt.addWidget(self._filt_mtime_from_en)
+        h_mt.addWidget(self._filt_mtime_from, 1)
+        h_mt.addWidget(self._filt_mtime_to_en)
+        h_mt.addWidget(self._filt_mtime_to, 1)
+        fl.addRow("修改时间:", h_mt)
         fl.addRow(btn_apply)
         root_layout.addWidget(filt)
 
@@ -111,10 +157,35 @@ class MainWindow(QMainWindow):
         self._table.setAlternatingRowColors(True)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.verticalHeader().setVisible(False)
+        sm = self._table.selectionModel()
+        if sm:
+            sm.selectionChanged.connect(self._on_table_selection_changed)
         splitter.addWidget(self._table)
 
         right = QWidget()
         rv = QVBoxLayout(right)
+        prev_box = QGroupBox("预览（需单选列表中的单个文件）")
+        pv = QVBoxLayout(prev_box)
+        self._preview_stack = QStackedWidget()
+        self._preview_placeholder = QLabel(
+            "在列表中选中单个文件后在此预览。\n"
+            "图片（png/jpg/…）显示缩略图；文本显示内容；其它文件显示十六进制摘录。"
+        )
+        self._preview_placeholder.setWordWrap(True)
+        self._preview_placeholder.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self._preview_text = QPlainTextEdit()
+        self._preview_text.setReadOnly(True)
+        self._preview_text.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        self._preview_text.setPlaceholderText("")
+        self._preview_image = QLabel()
+        self._preview_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview_image.setMinimumHeight(160)
+        self._preview_image.setStyleSheet("QLabel { background: #f5f5f5; border: 1px solid #ccc; }")
+        self._preview_stack.addWidget(self._preview_placeholder)
+        self._preview_stack.addWidget(self._preview_text)
+        self._preview_stack.addWidget(self._preview_image)
+        pv.addWidget(self._preview_stack, 1)
+        rv.addWidget(prev_box, 2)
         rv.addWidget(QLabel("目录画像（启发式，仅供参考）"))
         self._profile_view = QPlainTextEdit()
         self._profile_view.setReadOnly(True)
@@ -163,11 +234,23 @@ class MainWindow(QMainWindow):
     def _apply_filters(self) -> None:
         mn = _parse_mb(self._filt_min_mb.text())
         mx = _parse_mb(self._filt_max_mb.text())
+        mt_min = (
+            float(self._filt_mtime_from.dateTime().toSecsSinceEpoch())
+            if self._filt_mtime_from_en.isChecked()
+            else None
+        )
+        mt_max = (
+            float(self._filt_mtime_to.dateTime().toSecsSinceEpoch())
+            if self._filt_mtime_to_en.isChecked()
+            else None
+        )
         self._proxy.set_filters(
             self._filt_ext.text(),
             mn,
             mx,
             self._filt_name.text(),
+            mt_min,
+            mt_max,
         )
         self._status.showMessage(
             f"当前列表显示 {self._proxy.rowCount()} / {self._model.rowCount()} 行。"
@@ -207,6 +290,91 @@ class MainWindow(QMainWindow):
         text = summarize_directory(self._root, entries)
         self._profile_view.setPlainText(text)
         self._status.showMessage(f"扫描完成：{len(entries)} 个文件。")
+        self._update_file_preview()
+
+    def _on_table_selection_changed(self, selected: QItemSelection, deselected: QItemSelection) -> None:
+        del selected, deselected
+        self._update_file_preview()
+
+    def _update_file_preview(self) -> None:
+        self._preview_image.clear()
+        sel = self._table.selectionModel()
+        if not sel:
+            return
+        rows = list(sel.selectedRows())
+        if len(rows) != 1:
+            self._preview_stack.setCurrentWidget(self._preview_placeholder)
+            if len(rows) == 0:
+                self._preview_placeholder.setText(
+                    "在列表中选中单个文件后在此预览。\n"
+                    "图片（png/jpg/…）显示缩略图；文本显示内容；其它文件显示十六进制摘录。"
+                )
+            else:
+                self._preview_placeholder.setText("预览仅在选择单个文件时可用（当前已选中多个）。")
+            return
+
+        src = self._proxy.mapToSource(rows[0])
+        path_s = self._model.data(src, ROLE_PATH)
+        if not path_s:
+            self._preview_placeholder.setText("无法解析所选文件路径。")
+            self._preview_stack.setCurrentWidget(self._preview_placeholder)
+            return
+
+        path = Path(path_s)
+        if not path.is_file():
+            self._preview_placeholder.setText(f"不是可读文件或不存在：\n{path}")
+            self._preview_stack.setCurrentWidget(self._preview_placeholder)
+            return
+
+        suffix = path.suffix.lower()
+        if suffix in _IMAGE_SUFFIXES:
+            pix = QPixmap(str(path))
+            if pix.isNull():
+                self._preview_placeholder.setText("无法作为位图加载（可能已损坏或缺少格式插件）。")
+                self._preview_stack.setCurrentWidget(self._preview_placeholder)
+                return
+            pix = pix.scaled(
+                _PREVIEW_IMAGE_MAX_EDGE,
+                _PREVIEW_IMAGE_MAX_EDGE,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._preview_image.setPixmap(pix)
+            self._preview_stack.setCurrentWidget(self._preview_image)
+            return
+
+        try:
+            size = path.stat().st_size
+        except OSError as e:
+            self._preview_placeholder.setText(f"无法读取文件：{e}")
+            self._preview_stack.setCurrentWidget(self._preview_placeholder)
+            return
+
+        read_size = min(size, _PREVIEW_MAX_TEXT_BYTES)
+        try:
+            with path.open("rb") as f:
+                raw = f.read(read_size)
+        except OSError as e:
+            self._preview_placeholder.setText(f"读取失败：{e}")
+            self._preview_stack.setCurrentWidget(self._preview_placeholder)
+            return
+
+        note_truncate = ""
+        if size > read_size:
+            note_truncate = f"\n\n… 仅读取前 {read_size // 1024} KB 用于预览（共约 {size // 1024} KB）。"
+
+        if _is_probably_text(raw):
+            text = raw.decode("utf-8", errors="replace") + note_truncate
+            self._preview_text.setPlainText(text)
+        else:
+            hex_part = _format_hex_preview(raw, _PREVIEW_HEX_BYTES)
+            if len(raw) > _PREVIEW_HEX_BYTES:
+                hex_part += "\n…（十六进制视图已截断）"
+            self._preview_text.setPlainText(
+                "（二进制/非文本推测）\n\n" + hex_part + note_truncate
+            )
+        self._preview_text.verticalScrollBar().setValue(0)
+        self._preview_stack.setCurrentWidget(self._preview_text)
 
     def _selected_paths(self) -> list[Path]:
         paths: list[Path] = []
