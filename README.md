@@ -1,6 +1,6 @@
 # FileManager
 
-Desktop file utility: scan a root folder, filter and sort files, multi-select batches, copy or move to recycle bin, and show a lightweight “directory profile” (heuristic).
+Desktop file utility: scan a root folder, filter and sort files, multi-select batches, copy or delete (Recycle Bin on fixed local drives on Windows; permanent delete on removable/network/CD volumes with a warning), and show a lightweight “directory profile” (heuristic).
 
 ---
 
@@ -14,7 +14,7 @@ FileManager is a **PySide6 (Qt for Python)** GUI. You pick a directory, optional
 
 - **UI thread stays responsive**: filesystem walks run in a `QThread` (`ScanThread`); results are applied when the scan finishes.
 - **Model / view separation**: `FileTableModel` (`QAbstractTableModel`) holds scanned entries; `FileFilterProxy` (`QSortFilterProxyModel`) handles filtering and stable sorting for size/time columns via `lessThan`.
-- **Safe deletes**: “Delete” uses `send2trash` so items go to the **system recycle bin** on supported platforms.
+- **Safe deletes**: On **Windows**, fixed local drives use `send2trash` (Recycle Bin). **Removable, network, and CD-ROM volumes** are treated as “no reliable Recycle Bin”: the app warns and **permanently deletes** with `unlink`. Other platforms still use `send2trash` for all paths (subject to OS rules).
 - **Directory profile is non-authoritative**: rules + extension statistics only—useful hints, not classification ground truth.
 
 ### Core components
@@ -27,7 +27,7 @@ FileManager is a **PySide6 (Qt for Python)** GUI. You pick a directory, optional
 | `table_model.py` | `FileTableModel` columns and `Qt.UserRole` fields for path/size/suffix/time; `FileFilterProxy` for extensions, size range, name substring, mtime range. |
 | `scanner.py` | `ScanThread`: recursive `rglob` or single-level `iterdir`, emits file list or errors. |
 | `profile.py` | `summarize_directory`: extension histogram, coarse “topic” guesses, root markers (`package.json`, etc.). |
-| `fs_ops.py` | `copy_paths`, `trash_paths` (wraps `send2trash`). |
+| `fs_ops.py` | `copy_paths`; `trash_paths` (`send2trash`) for fixed local volumes on Windows; `delete_paths_permanent`; `path_expects_recycle_bin` (drive-type heuristic for removable/network/CD). |
 | `__main__.py` | Allows `python -m filemanager`. |
 
 ### Repository layout
@@ -85,13 +85,13 @@ The spec uses `collect_all("PySide6")` for reliability; the bundle is large. Opt
 
 ### 概览
 
-FileManager 是用 **PySide6** 写的桌面小工具：选定**根目录**，可选择是否**递归子目录**，枚举树上所有**文件**并在表格中展示；通过筛选与排序缩小范围，支持**多选**，**单选时可在侧栏预览**（图片/文本/十六进制摘录）；批量**复制到指定文件夹**或**移入回收站**；右侧文本区给出基于扩展名与根目录标记的**目录画像**（启发式说明，仅供参考）。
+FileManager 是用 **PySide6** 写的桌面小工具：选定**根目录**，可选择是否**递归子目录**，枚举树上所有**文件**并在表格中展示；通过筛选与排序缩小范围，支持**多选**，**单选时可在侧栏预览**（图片/文本/十六进制摘录）；批量**复制到指定文件夹**或**删除所选**（Windows 下本地固定盘尽量进回收站，外接可移动/网络/光驱等卷为永久删除并会提示）；右侧文本区给出基于扩展名与根目录标记的**目录画像**（启发式说明，仅供参考）。
 
 ### 设计理念
 
 - **界面不阻塞**：目录遍历在 `ScanThread`（`QThread`）中执行，扫完后一次性更新模型。
 - **模型与视图分离**：底层 `FileTableModel` 存放扫描结果；`FileFilterProxy` 在代理层做筛选与排序，数值列（大小、时间）在 `lessThan` 中按真实数值比较。
-- **删除可恢复**：删除走 `send2trash`，尽量进入系统回收站。
+- **删除与卷类型**：Windows 上根据卷类型区分：本地固定盘优先 `send2trash` 进回收站；可移动盘、网络盘、光驱等走永久删除并在确认框说明。其它系统仍统一使用 `send2trash`（以系统行为为准）。
 - **画像非判定**：只做统计与规则匹配，不充当严格“分类器”。
 
 ### 核心模块说明
@@ -103,7 +103,7 @@ FileManager 是用 **PySide6** 写的桌面小工具：选定**根目录**，可
 - **`table_model`**：表格模型与筛选代理，扩展名/大小/文件名/修改时间范围在 `set_filters` + `filterAcceptsRow` 中实现。
 - **`scanner`**：后台扫描，递归用 `Path.rglob`，仅当前层用 `iterdir`。
 - **`profile`**：`summarize_directory` 汇总扩展名占比、内容倾向与常见工程文件/目录标记。
-- **`fs_ops`**：复制与回收站删除的具体实现。
+- **`fs_ops`**：复制；按卷类型选择回收站删除或永久删除。
 
 ### 代码目录结构
 

@@ -1,3 +1,14 @@
+"""表格数据模型与筛选代理：连接「扫描得到的 FileEntry 列表」与 QTableView。
+
+架构说明：
+- ``FileTableModel``（源模型）：持有 ``list[FileEntry]``，提供行列数据与自定义 Role。
+- ``FileFilterProxy``（``QSortFilterProxyModel``）：在不改源数据的前提下做行过滤与排序；
+  视图中 ``setModel(proxy)``，用户看到的是代理后的行号，取路径时需 ``mapToSource``。
+
+自定义 Role（.Qt.UserRole 起）：便于代理在 ``filterAcceptsRow`` / ``lessThan`` 里读取
+原始数值（大小、时间戳），避免解析格式化后的显示字符串。
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -7,6 +18,7 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QSortFilterProx
 from filemanager.models import FileEntry
 from filemanager.profile import _format_size
 
+# 与 QTableView 约定：DisplayRole 给人类可读字符串；以下为机器友好字段
 ROLE_PATH = Qt.ItemDataRole.UserRole
 ROLE_SIZE = Qt.ItemDataRole.UserRole + 1
 ROLE_SUFFIX = Qt.ItemDataRole.UserRole + 2
@@ -14,6 +26,8 @@ ROLE_MTIME = Qt.ItemDataRole.UserRole + 3
 
 
 class FileTableModel(QAbstractTableModel):
+    """扫描结果表格的源模型：每一行对应一个 ``FileEntry``。"""
+
     HEADERS = ["名称", "相对路径", "扩展名", "大小", "修改时间"]
 
     def __init__(self, root: Path) -> None:
@@ -22,9 +36,11 @@ class FileTableModel(QAbstractTableModel):
         self._entries: list[FileEntry] = []
 
     def set_root(self, root: Path) -> None:
+        """扫描根目录变更时更新，用于「相对路径」列与画像统计根路径一致。"""
         self._root = root.resolve()
 
     def set_entries(self, entries: list[FileEntry]) -> None:
+        """一次性替换全部行数据；``beginResetModel/endResetModel`` 通知视图整表刷新。"""
         self.beginResetModel()
         self._entries = entries
         self.endResetModel()
@@ -33,6 +49,7 @@ class FileTableModel(QAbstractTableModel):
         return self._entries
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
+        # Qt 约定：parent 有效时表示子节点行数；本模型为平面表，仅根层有数据
         return 0 if parent.isValid() else len(self._entries)
 
     def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
@@ -77,12 +94,16 @@ class FileTableModel(QAbstractTableModel):
         return None
 
     def entry_at_row(self, row: int) -> FileEntry | None:
+        """调试或扩展用：按源模型行号取 ``FileEntry``。"""
         if 0 <= row < len(self._entries):
             return self._entries[row]
         return None
 
 
 def _parse_ext_filter(text: str) -> set[str] | None:
+    """将输入框中的扩展名列表解析为小写带点的集合；空输入表示「不限制扩展名」返回 None。
+
+    支持中文逗号、忽略空白；未写前导点时自动补上 ``.``。"""
     t = text.strip()
     if not t:
         return None
@@ -98,7 +119,11 @@ def _parse_ext_filter(text: str) -> set[str] | None:
 
 
 class FileFilterProxy(QSortFilterProxyModel):
-    """按扩展名、大小、名称子串、修改时间范围筛选当前扫描结果。"""
+    """按扩展名、大小、名称子串、修改时间范围筛选当前扫描结果。
+
+    ``set_filters`` 会 ``invalidateFilter``，触发 ``filterAcceptsRow`` 重新评估每一行。
+    排序：第 3、4 列（大小、时间）在 ``lessThan`` 中按数值比较，避免字典序比较字符串出错。
+    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -127,6 +152,7 @@ class FileFilterProxy(QSortFilterProxyModel):
         self.invalidateFilter()
 
     def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:  # noqa: N802
+        # 非顶层索引直接放行（平面表无子项，防御性写法）
         if source_parent.isValid():
             return True
         model = self.sourceModel()
@@ -149,6 +175,7 @@ class FileFilterProxy(QSortFilterProxyModel):
         if self._name_sub and self._name_sub not in name:
             return False
         mtime = float(model.data(idx, ROLE_MTIME) or 0)
+        # 时间与 QDateTimeEdit 使用同一套「本地」Unix 秒级时间戳，可与 stat.st_mtime 比较
         if self._min_mtime is not None and mtime < self._min_mtime:
             return False
         if self._max_mtime is not None and mtime > self._max_mtime:

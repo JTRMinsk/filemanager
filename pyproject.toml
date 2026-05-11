@@ -1,6 +1,6 @@
 [project]
 name = "filemanager"
-version = "0.3.0"
+version = "0.3.1"
 description = "图形化文件管理：扫描、筛选、排序、批量操作与目录用途推测"
 readme = "README.md"
 requires-python = ">=3.10"

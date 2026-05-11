@@ -1,3 +1,14 @@
+"""主窗口：布局 UI、连接扫描线程与表格模型、处理筛选/预览/复制/删除。
+
+数据流（便于断点调试时对照）：
+1. 用户点「扫描」→ ``_start_scan`` 创建 ``ScanThread``，只负责磁盘遍历。
+2. 线程结束 → ``_on_scan_finished`` 把 ``entries`` 写入 ``FileTableModel``，再 ``_apply_filters`` 刷新代理。
+3. ``QTableView`` 的 model 是 ``FileFilterProxy``，选中的 QModelIndex 属于代理坐标；
+   取真实路径必须 ``mapToSource`` 后用 ``ROLE_PATH``。
+
+注意：复制/删除/预览读文件仍在 **GUI 主线程** 同步执行，大文件可能短暂卡顿（已知限制）。
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -27,11 +38,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from filemanager.fs_ops import copy_paths, trash_paths
+from filemanager.fs_ops import (
+    copy_paths,
+    delete_paths_permanent,
+    path_expects_recycle_bin,
+    trash_paths,
+)
 from filemanager.profile import summarize_directory
 from filemanager.scanner import ScanThread
 from filemanager.table_model import ROLE_PATH, FileFilterProxy, FileTableModel
 
+# 预览：限制读盘大小，避免超大文本一次性读入内存拖垮界面
 _PREVIEW_MAX_TEXT_BYTES = 512 * 1024
 _PREVIEW_HEX_BYTES = 4096
 _PREVIEW_IMAGE_MAX_EDGE = 480
@@ -39,6 +56,7 @@ _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"})
 
 
 def _parse_mb(s: str) -> int | None:
+    """将筛选框中的「MB」小数字符串转为字节数（int）；空或非数字返回 None。"""
     s = s.strip()
     if not s:
         return None
@@ -50,6 +68,9 @@ def _parse_mb(s: str) -> int | None:
 
 
 def _is_probably_text(sample: bytes) -> bool:
+    """启发式判断字节块是否像文本：前 8KB 内 NUL 则判二进制；可打印 ASCII 比例 ≥ 85% 则判文本。
+
+    用于决定预览区用 UTF-8 解码还是十六进制栅栏视图。"""
     if not sample:
         return True
     if b"\x00" in sample[:8192]:
@@ -60,6 +81,7 @@ def _is_probably_text(sample: bytes) -> bool:
 
 
 def _format_hex_preview(data: bytes, limit: int) -> str:
+    """经典 hex dump：偏移 + 十六进制 + ASCII 列，仅展示前 limit 字节。"""
     chunk = data[:limit]
     lines: list[str] = []
     for i in range(0, len(chunk), 16):
@@ -71,12 +93,15 @@ def _format_hex_preview(data: bytes, limit: int) -> str:
 
 
 class MainWindow(QMainWindow):
+    """应用程序主窗口（单实例）；内部组件通过 ``_build_ui`` 创建与布局。"""
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("FileManager — 本地文件批量管理")
         self.resize(1200, 720)
 
         self._root = Path.home()
+        # 源模型存绝对路径列表；代理模型包一层筛选/排序
         self._model = FileTableModel(self._root)
         self._proxy = FileFilterProxy()
         self._proxy.setSourceModel(self._model)
@@ -89,7 +114,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         root_layout = QVBoxLayout(central)
 
-        # 根目录与扫描
+        # ---------- 顶栏：根路径 + 是否递归 + 扫描 ----------
         dir_row = QHBoxLayout()
         self._path_edit = QLineEdit(str(self._root))
         self._path_edit.setPlaceholderText("要扫描的根目录…")
@@ -106,7 +131,7 @@ class MainWindow(QMainWindow):
         dir_row.addWidget(self._btn_scan, 0)
         root_layout.addLayout(dir_row)
 
-        # 筛选
+        # ---------- 筛选：只影响代理层，不删源数据 ----------
         filt = QGroupBox("筛选（应用于当前扫描结果）")
         fl = QFormLayout(filt)
         self._filt_ext = QLineEdit()
@@ -126,6 +151,7 @@ class MainWindow(QMainWindow):
         h_sz.addWidget(self._filt_max_mb)
         fl.addRow("大小 (MB):", h_sz)
         fl.addRow("名称:", self._filt_name)
+        # 修改时间：仅当勾选「从/至」时参与筛选；时间为本地 QDateTime，与 toSecsSinceEpoch 对齐
         h_mt = QHBoxLayout()
         self._filt_mtime_from_en = QCheckBox("从")
         self._filt_mtime_from = QDateTimeEdit(QDateTime.currentDateTime())
@@ -147,7 +173,7 @@ class MainWindow(QMainWindow):
         fl.addRow(btn_apply)
         root_layout.addWidget(filt)
 
-        # 表格 + 画像
+        # ---------- Body：左表右栏 ----------
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self._table = QTableView()
         self._table.setModel(self._proxy)
@@ -157,6 +183,7 @@ class MainWindow(QMainWindow):
         self._table.setAlternatingRowColors(True)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.verticalHeader().setVisible(False)
+        # 选中变化 → 更新预览（单文件才有内容）
         sm = self._table.selectionModel()
         if sm:
             sm.selectionChanged.connect(self._on_table_selection_changed)
@@ -164,6 +191,7 @@ class MainWindow(QMainWindow):
 
         right = QWidget()
         rv = QVBoxLayout(right)
+        # QStackedWidget：占位说明 | 文本预览 | 图片预览 三页互斥显示
         prev_box = QGroupBox("预览（需单选列表中的单个文件）")
         pv = QVBoxLayout(prev_box)
         self._preview_stack = QStackedWidget()
@@ -202,7 +230,7 @@ class MainWindow(QMainWindow):
         ops_row = QHBoxLayout()
         self._btn_copy = QPushButton("复制到…")
         self._btn_copy.clicked.connect(self._copy_selected)
-        self._btn_trash = QPushButton("移入回收站")
+        self._btn_trash = QPushButton("删除所选")
         self._btn_trash.clicked.connect(self._trash_selected)
         ops_row.addWidget(self._btn_copy)
         ops_row.addWidget(self._btn_trash)
@@ -229,9 +257,11 @@ class MainWindow(QMainWindow):
             self._path_edit.setText(d)
 
     def _current_root(self) -> Path:
+        """从输入框解析当前「要扫描的根」；空则当作当前目录 ``.``。"""
         return Path(self._path_edit.text().strip() or ".").expanduser()
 
     def _apply_filters(self) -> None:
+        """把表单条件推入代理模型；扫描结束与手动点「应用筛选」都会调用。"""
         mn = _parse_mb(self._filt_min_mb.text())
         mx = _parse_mb(self._filt_max_mb.text())
         mt_min = (
@@ -257,6 +287,7 @@ class MainWindow(QMainWindow):
         )
 
     def _start_scan(self) -> None:
+        """防重入：若上一线程未结束则直接提示；否则禁用按钮、启动 ScanThread。"""
         if self._scan_thread and self._scan_thread.isRunning():
             QMessageBox.information(self, "扫描中", "已有扫描任务进行中。")
             return
@@ -278,6 +309,7 @@ class MainWindow(QMainWindow):
         th.start()
 
     def _on_thread_finished(self) -> None:
+        """QThread 生命周期结束（无论成功失败），恢复扫描按钮。"""
         self._btn_scan.setEnabled(True)
 
     def _on_scan_failed(self, msg: str) -> None:
@@ -293,10 +325,12 @@ class MainWindow(QMainWindow):
         self._update_file_preview()
 
     def _on_table_selection_changed(self, selected: QItemSelection, deselected: QItemSelection) -> None:
+        # Qt 传入新旧选区；预览只关心「当前」选中行数，参数可忽略
         del selected, deselected
         self._update_file_preview()
 
     def _update_file_preview(self) -> None:
+        """仅当选中行数恰好为 1 时加载预览；图片走 QPixmap，否则读前若干字节判断文本/十六进制。"""
         self._preview_image.clear()
         sel = self._table.selectionModel()
         if not sel:
@@ -313,6 +347,7 @@ class MainWindow(QMainWindow):
                 self._preview_placeholder.setText("预览仅在选择单个文件时可用（当前已选中多个）。")
             return
 
+        # 代理索引 → 源模型索引 → ROLE_PATH
         src = self._proxy.mapToSource(rows[0])
         path_s = self._model.data(src, ROLE_PATH)
         if not path_s:
@@ -377,6 +412,7 @@ class MainWindow(QMainWindow):
         self._preview_stack.setCurrentWidget(self._preview_text)
 
     def _selected_paths(self) -> list[Path]:
+        """当前表格选中行对应的 **绝对路径** 列表（先 mapToSource）。"""
         paths: list[Path] = []
         for idx in self._table.selectionModel().selectedRows():
             src = self._proxy.mapToSource(idx)
@@ -386,6 +422,7 @@ class MainWindow(QMainWindow):
         return paths
 
     def _select_all_visible(self) -> None:
+        """全选 **代理后当前可见** 的所有行（已受筛选影响）。"""
         sel = self._table.selectionModel()
         if not sel:
             return
@@ -414,19 +451,60 @@ class MainWindow(QMainWindow):
         self._start_scan()
 
     def _trash_selected(self) -> None:
+        """按卷拆分：可走回收站的用 send2trash；否则 unlink 并已在确认框中说明永久删除。"""
         paths = self._selected_paths()
         if not paths:
             QMessageBox.information(self, "删除", "请先选择文件。")
             return
+
+        recycle_paths = [p for p in paths if path_expects_recycle_bin(p)]
+        perm_paths = [p for p in paths if not path_expects_recycle_bin(p)]
+
+        if perm_paths and recycle_paths:
+            title = "确认删除"
+            text = (
+                f"已选中 {len(paths)} 个文件。\n\n"
+                f"其中 {len(perm_paths)} 个位于可移动磁盘、网络驱动器或光驱等卷，通常无法按本机回收站方式恢复，"
+                f"将直接永久删除。\n"
+                f"其余 {len(recycle_paths)} 个将尝试移入回收站（可按系统回收站恢复）。\n\n"
+                "是否继续？"
+            )
+        elif perm_paths:
+            title = "确认永久删除"
+            text = (
+                f"已选中 {len(perm_paths)} 个文件，均在可移动/网络/光驱等卷上。\n"
+                "此类位置删除后通常无法从本机回收站恢复，将直接永久删除。\n\n是否继续？"
+            )
+        else:
+            title = "确认移入回收站"
+            text = (
+                f"将 {len(recycle_paths)} 个文件移入回收站？（可用系统回收站恢复）"
+            )
+
         r = QMessageBox.question(
             self,
-            "确认移入回收站",
-            f"将 {len(paths)} 个文件移入回收站？（可用系统回收站恢复）",
+            title,
+            text,
         )
         if r != QMessageBox.StandardButton.Yes:
             return
-        ok, err = trash_paths(paths)
+
+        ok: list[str] = []
+        err: list[str] = []
+        if recycle_paths:
+            o, e = trash_paths(recycle_paths)
+            ok.extend(o)
+            err.extend(e)
+        if perm_paths:
+            o, e = delete_paths_permanent(perm_paths)
+            ok.extend(o)
+            err.extend(e)
+
         msg = f"已处理 {len(ok)} 个。"
+        if perm_paths and recycle_paths:
+            msg += f"\n（回收站：{len(recycle_paths)} 个；永久删除：{len(perm_paths)} 个）"
+        elif perm_paths:
+            msg += "\n（均为永久删除）"
         if err:
             msg += "\n\n错误:\n" + "\n".join(err[:20])
         QMessageBox.information(self, "完成", msg)

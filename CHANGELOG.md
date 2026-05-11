@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.1] — 2026-05-11
+
+### Fixed
+
+- **外接卷删除说明与行为**：在 Windows 上对可移动盘、网络驱动器、光驱等卷不再按「移入回收站」处理；确认框明确提示将**永久删除**，并使用 `Path.unlink`。本地固定盘仍使用 `send2trash` 进回收站。混合选中时分别处理两类路径。主界面按钮文案改为「删除所选」。
+
+### Notes
+
+- 识别依据为 `GetDriveTypeW`：被系统标为「固定」的外接硬盘仍可能走回收站，与资源管理器行为一致。
+
+### Documentation
+
+- 各模块补充中文注释（模块说明、数据流、Qt 模型/线程约定等），不改变运行逻辑。
+
 ## [0.3.0] — 2026-05-11
 
 ### Added
