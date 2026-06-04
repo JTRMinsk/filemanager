@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -34,9 +36,10 @@ class SettingsDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("设置 — API 配置")
-        self.resize(640, 460)
+        self.resize(640, 520)
         self._build_ui()
         self._reload_list()
+        self._load_allowed_roots()
 
     def _build_ui(self) -> None:
         root = QHBoxLayout(self)
@@ -103,6 +106,15 @@ class SettingsDialog(QDialog):
         note.setWordWrap(True)
         note.setStyleSheet("color: gray; font-size: 11px;")
         right.addWidget(note)
+
+        roots_form = QFormLayout()
+        self._f_allowed_roots = QLineEdit()
+        self._f_allowed_roots.setPlaceholderText("留空 = 仅允许用户主目录；多路径用 ; 分隔")
+        roots_form.addRow("允许操作的目录:", self._f_allowed_roots)
+        btn_save_roots = QPushButton("保存白名单")
+        btn_save_roots.clicked.connect(self._on_save_allowed_roots)
+        roots_form.addRow("", btn_save_roots)
+        right.addLayout(roots_form)
 
         self._btn_save = QPushButton("保存此配置")
         self._btn_save.clicked.connect(self._on_save)
@@ -195,3 +207,18 @@ class SettingsDialog(QDialog):
             return
         api_store.set_active(name)
         self._reload_list()
+
+    def _load_allowed_roots(self) -> None:
+        roots = api_store.get_allowed_roots()
+        self._f_allowed_roots.setText(";".join(str(p) for p in roots))
+
+    def _parse_allowed_roots_text(self) -> list[Path]:
+        text = self._f_allowed_roots.text().strip()
+        if not text:
+            return []
+        parts = [p.strip() for p in text.replace("；", ";").split(";") if p.strip()]
+        return [Path(p).expanduser() for p in parts]
+
+    def _on_save_allowed_roots(self) -> None:
+        api_store.set_allowed_roots(self._parse_allowed_roots_text())
+        QMessageBox.information(self, "已保存", "写操作白名单已更新。")

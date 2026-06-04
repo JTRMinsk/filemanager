@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from filemanager.chat_panel import ChatPanel
+from filemanager import api_store
 from filemanager.core import (
     IMAGE_SUFFIXES,
     PREVIEW_HEX_BYTES,
@@ -85,7 +86,7 @@ class MainWindow(QMainWindow):
 
         outer_splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        self._chat = ChatPanel()
+        self._chat = ChatPanel(allowed_roots=api_store.get_allowed_roots())
         self._chat.setMinimumWidth(280)
         self._chat.files_changed.connect(self._start_scan)
         outer_splitter.addWidget(self._chat)
@@ -103,12 +104,14 @@ class MainWindow(QMainWindow):
         self._btn_scan.clicked.connect(self._start_scan)
         self._recursive = QCheckBox("包含子目录")
         self._recursive.setChecked(True)
+        self._recursive.toggled.connect(lambda _on: self._sync_chat_ui_context())
         dir_row.addWidget(QLabel("根目录:"), 0)
         dir_row.addWidget(self._path_edit, 1)
         dir_row.addWidget(btn_browse, 0)
         dir_row.addWidget(self._recursive, 0)
         dir_row.addWidget(self._btn_scan, 0)
         root_layout.addLayout(dir_row)
+        self._sync_chat_ui_context()
 
         # ---------- 筛选：只影响代理层，不删源数据 ----------
         filt = QGroupBox("筛选（应用于当前扫描结果）")
@@ -240,6 +243,11 @@ class MainWindow(QMainWindow):
         if d:
             self._root = Path(d)
             self._path_edit.setText(d)
+            self._sync_chat_ui_context()
+
+    def _sync_chat_ui_context(self) -> None:
+        """把右侧文件面板根目录同步给对话栏 Agent 上下文。"""
+        self._chat.set_ui_context(self._current_root(), self._recursive.isChecked())
 
     def _current_root(self) -> Path:
         """从输入框解析当前「要扫描的根」；空则当作当前目录 ``.``。"""
@@ -281,6 +289,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "路径无效", f"不是有效目录：\n{root}")
             return
         self._root = root.resolve()
+        self._sync_chat_ui_context()
         self._model.set_root(self._root)
         self._btn_scan.setEnabled(False)
         self._status.showMessage("正在扫描…")

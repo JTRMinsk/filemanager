@@ -36,6 +36,7 @@ def scan_directory(
     root: Path,
     recursive: bool,
     progress_cb=None,
+    max_files: int | None = None,
 ) -> list[FileEntry]:
     """遍历 ``root`` 下的文件并构造 ``FileEntry`` 列表（仅文件，目录不作为条目）。
 
@@ -44,6 +45,8 @@ def scan_directory(
         recursive:   True 用 ``rglob`` 递归全部子目录;False 用 ``iterdir`` 仅当前层。
         progress_cb: 可选回调 ``progress_cb(count: int)``，每累计 500 个文件调用一次，
                      结束时再调用一次（对应原 ``ScanThread`` 的 ``progress`` 信号节奏）。
+        max_files:   可选数量上限。达到后停止遍历并返回已收集的部分（防超大目录撑爆/卡顿）。
+                     None 表示不限（GUI 默认按此调用，行为与改造前一致）。
 
     返回:
         ``list[FileEntry]``。
@@ -55,31 +58,20 @@ def scan_directory(
     root = root.resolve()
     entries: list[FileEntry] = []
 
-    if recursive:
-        # rglob("*") 递归所有子路径;仅保留 is_file()，目录不作为条目
-        for p in root.rglob("*"):
-            if not p.is_file():
-                continue
-            try:
-                st = p.stat()
-                entries.append(FileEntry(path=p, size=st.st_size, mtime=st.st_mtime))
-            except OSError:
-                # 单个文件 stat 失败（被删、无权限）则跳过，继续扫其它文件
-                continue
-            if progress_cb is not None and len(entries) % 500 == 0:
-                progress_cb(len(entries))
-    else:
-        # 仅一层:iterdir 不递归。若 root 无法打开，OSError 向上抛出由调用方处理
-        for p in root.iterdir():
-            if not p.is_file():
-                continue
-            try:
-                st = p.stat()
-                entries.append(FileEntry(path=p, size=st.st_size, mtime=st.st_mtime))
-            except OSError:
-                continue
-            if progress_cb is not None and len(entries) % 500 == 0:
-                progress_cb(len(entries))
+    iterator = root.rglob("*") if recursive else root.iterdir()
+    for p in iterator:
+        if not p.is_file():
+            continue
+        try:
+            st = p.stat()
+            entries.append(FileEntry(path=p, size=st.st_size, mtime=st.st_mtime))
+        except OSError:
+            # 单个文件 stat 失败（被删、无权限）则跳过，继续扫其它文件
+            continue
+        if progress_cb is not None and len(entries) % 500 == 0:
+            progress_cb(len(entries))
+        if max_files is not None and len(entries) >= max_files:
+            break  # 达到上限，停止（调用方据 len==max_files 判断可能被截断）
 
     if progress_cb is not None:
         progress_cb(len(entries))

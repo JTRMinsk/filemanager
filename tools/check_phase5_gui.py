@@ -59,6 +59,14 @@ ds = next(p for p in api_store.list_profiles() if p.name == "DeepSeek测试")
 assert ds.base_url == "https://api.deepseek.com" and ds.backend == "deepseek"
 ok("增 / 改 / 选 / 删 + active 回退 + DeepSeek base_url 全部正确")
 
+print("== allowed_roots 往返 ==")
+api_store.set_allowed_roots([Path.home() / "fm_test"])
+roots = api_store.get_allowed_roots()
+assert len(roots) == 1 and roots[0] == (Path.home() / "fm_test").resolve()
+api_store.set_allowed_roots([])
+assert api_store.get_allowed_roots() == []
+ok("allowed_roots get/set 与 resolve 正常")
+
 print("== make_llm_client_from_profile (DeepSeek) ==")
 from filemanager.config import make_llm_client_from_profile
 from filemanager.llm.openai_client import OpenAIClient
@@ -89,12 +97,71 @@ print("== ChatPanel 事件渲染（喂假事件，不联网）==")
 panel._append_user("扫描我的下载目录")
 panel._on_step({"type": "tool_call", "name": "scan_directory", "args": {"root": "/x", "recursive": True}})
 panel._on_step({"type": "tool_result", "name": "scan_directory", "summary": "共 42 个文件，总大小约 1.2 GB。\n更多…"})
-panel._on_finished("已扫描，共 42 个文件。")
+panel._on_finished("已扫描，共 42 个文件。", False)
 doc = panel._stream.toPlainText()
 assert "扫描我的下载目录" in doc
 assert "scan_directory" in doc
 assert "42 个文件" in doc
 ok("用户气泡 / 工具调用 / 工具结果 / 助手回复 均渲染入消息流")
+
+print("== files_changed 仅在写操作后发出 ==")
+fs_signals: list[bool] = []
+panel.files_changed.connect(lambda: fs_signals.append(True))
+panel._on_finished("好的，请告诉我目录。", False)
+assert not fs_signals, "纯文本回复不应触发 files_changed"
+panel._on_finished("已删除。", True)
+assert fs_signals, "写操作成功后应触发 files_changed"
+ok("files_changed 条件触发正确")
+
+print("== UI 上下文注入 ==")
+panel.set_ui_context(Path("C:/test/root"), True)
+msg = panel._message_with_context("看一下目录")
+assert "C:\\test\\root" in msg or "C:/test/root" in msg
+assert "[界面上下文]" in msg
+ok("set_ui_context + _message_with_context 正常")
+
+print("== ChatPanel 确认卡片 ==")
+panel._on_confirm_request({"name": "delete_files", "description": "删除 1 个文件 → 回收站", "is_write": True})
+assert not panel._confirm_bar.isHidden(), "确认卡片应可见"
+assert "delete_files" in panel._confirm_label.text()
+panel._answer_confirm(False)
+assert panel._confirm_bar.isHidden(), "取消后卡片应隐藏"
+ok("确认卡片展示 / 取消隐藏 正常")
+
+print("== AgentThread 跨线程确认（取消 + 通过）==")
+from PySide6.QtCore import QEventLoop, QTimer
+from filemanager.agent import Agent
+from filemanager.agent_thread import AgentThread
+from filemanager.llm.mock_client import MockLLMClient, call, say
+
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    target = root / "del_me.txt"
+    target.write_text("bye", encoding="utf-8")
+
+    # 取消:文件应保留
+    mock_cancel = MockLLMClient([call("delete_files", paths=[str(target)]), say("已取消。")])
+    agent_cancel = Agent(mock_cancel, allowed_roots=[root], confirm_mode="all")
+    loop1 = QEventLoop()
+    th1 = AgentThread(agent_cancel, "删掉 del_me.txt")
+    th1.confirm_request.connect(lambda _info: th1.provide_confirm(False))
+    th1.finished_ok.connect(lambda *_: loop1.quit())
+    th1.start()
+    loop1.exec()
+    assert target.exists(), "用户取消后文件应仍在"
+
+    # 确认:文件应删除（进回收站后路径不存在）
+    target.write_text("bye", encoding="utf-8")
+    mock_ok = MockLLMClient([call("delete_files", paths=[str(target)]), say("已删除。")])
+    agent_ok = Agent(mock_ok, allowed_roots=[root], confirm_mode="all")
+    loop2 = QEventLoop()
+    th2 = AgentThread(agent_ok, "删掉 del_me.txt")
+    th2.confirm_request.connect(lambda _info: QTimer.singleShot(0, lambda: th2.provide_confirm(True)))
+    th2.finished_ok.connect(lambda *_: loop2.quit())
+    th2.start()
+    loop2.exec()
+    assert not target.exists(), "确认后文件应被删除"
+ok("AgentThread confirm_request ↔ provide_confirm 取消/通过 均正常")
 
 print("== 无配置时的提示 ==")
 api_store.delete_profile("我的Claude")

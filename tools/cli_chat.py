@@ -91,7 +91,7 @@ def main() -> None:
             continue
 
         try:
-            reply = agent.run_turn(user, emit_cb=on_event)
+            reply, fs_changed = agent.run_turn(user, emit_cb=on_event)
         except Exception as e:  # noqa: BLE001
             print(f"\033[31m出错:{e}\033[0m\n")
             continue

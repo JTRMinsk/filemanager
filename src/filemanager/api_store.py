@@ -8,7 +8,8 @@
 
 数据布局（config.json）:
 {
-  "active": "我的Claude",                      # 当前选中的配置别名
+  "active": "我的Claude",
+  "allowed_roots": [],
   "profiles": [
      {"name": "我的Claude", "backend": "anthropic", "model": "", "key": "sk-...", "base_url": ""},
      {"name": "DeepSeek",     "backend": "deepseek", "model": "deepseek-v4-flash", "key": "sk-...", "base_url": "https://api.deepseek.com"}
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 from filemanager.config import CONFIG_FILE
 
@@ -53,11 +55,13 @@ def _strip_keys_for_disk(data: dict) -> dict:
 # ===========================================================================
 def _load_raw() -> dict:
     if not CONFIG_FILE.exists():
-        return {"active": "", "profiles": []}
+        return {"active": "", "allowed_roots": [], "profiles": []}
     try:
-        return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        raw = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"active": "", "profiles": []}
+        return {"active": "", "allowed_roots": [], "profiles": []}
+    raw.setdefault("allowed_roots", [])
+    return raw
 
 
 def _save_raw(data: dict) -> None:
@@ -70,6 +74,28 @@ def _save_raw(data: dict) -> None:
 # ===========================================================================
 # 公开 API（供设置界面调用）
 # ===========================================================================
+def get_allowed_roots() -> list[Path]:
+    """返回 Agent 写操作白名单根目录。空列表表示使用 guard 默认（用户主目录子树）。"""
+    raw = _load_raw()
+    out: list[Path] = []
+    for item in raw.get("allowed_roots", []):
+        s = str(item).strip()
+        if not s:
+            continue
+        try:
+            out.append(Path(s).expanduser().resolve())
+        except OSError:
+            out.append(Path(s).expanduser())
+    return out
+
+
+def set_allowed_roots(roots: list[Path]) -> None:
+    """保存白名单根目录（字符串列表写入 config.json）。"""
+    raw = _load_raw()
+    raw["allowed_roots"] = [str(p) for p in roots]
+    _save_raw(raw)
+
+
 def list_profiles() -> list[ApiProfile]:
     """返回所有已配置的 API（含 key）。"""
     raw = _load_raw()

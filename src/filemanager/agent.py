@@ -11,6 +11,7 @@ GUI 在阶段 5 通过 ``agent_thread.py`` 在 QThread 里调用本类，避免�
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -19,7 +20,7 @@ from typing import Callable
 
 from filemanager import tools
 from filemanager.llm.base import LLMClient, Message, ToolCall
-from filemanager.tools import ToolContext
+from filemanager.tools import ToolContext, WRITE_TOOLS
 
 # 防止模型在一轮里无限调工具
 MAX_TOOL_ITERATIONS = 12
@@ -30,6 +31,7 @@ SYSTEM_PROMPT = """你是一个本地文件管理助手，通过调用工具帮�
 - 用户描述目标，你决定调用哪些工具达成。
 - 文件列表可能很大；工具只会返回摘要。要对具体文件做进一步操作时，用 filter_files 按条件缩小，而不是要求逐个列出。
 - 路径要尽量用绝对路径。不确定用户指哪个目录时，先问清楚再扫描。
+- 若用户消息含「[界面上下文]」，其中「右侧文件面板当前根目录」即用户所指的「当前/现在/这个目录」，优先使用该路径，勿重复追问。
 - 回答简洁，用中文。
 """
 
@@ -60,12 +62,16 @@ class Agent:
         compact_threshold: int = 6000,   # 估算 token 超过此值触发压缩
         keep_recent_turns: int = 4,      # 压缩时保留最近多少条原始消息
         system_prompt: str = SYSTEM_PROMPT,
+        confirm_mode: str = "all",       # "all"（默认，全部确认）| "writes_only" | "none"
+        scan_cap: int = 10000,           # 扫描数量软上限
     ) -> None:
         self.llm = llm
         self.allowed_roots = allowed_roots or []
         self.compact_threshold = compact_threshold
         self.keep_recent_turns = keep_recent_turns
         self.system_prompt = system_prompt
+        self.confirm_mode = confirm_mode
+        self.scan_cap = scan_cap
         self.session = SessionState()
 
     # ---- 会话管理 ----
@@ -84,8 +90,8 @@ class Agent:
         attached_paths: list[Path] | None = None,
         emit_cb: EmitCb | None = None,
         confirm_cb: ConfirmCb | None = None,
-    ) -> str:
-        """处理一轮用户输入，返回模型最终文本回复。
+    ) -> tuple[str, bool]:
+        """处理一轮用户输入，返回 (模型最终文本回复, 是否发生了写盘变更)。
 
         attached_paths: 用户拖进来的文件;以结构化附件形式进入 user 消息（不自动读内容，
                         模型可按需调 preview_file）。
@@ -93,6 +99,7 @@ class Agent:
         confirm_cb:     破坏性工具的确认回调（阶段 3 用）。
         """
         emit = emit_cb or (lambda _e: None)
+        filesystem_changed = False
 
         # 1. 组装本轮 user 消息（含附件清单）
         content = user_text
@@ -108,7 +115,7 @@ class Agent:
         self.session.messages.append(Message(role="user", content=content))
 
         # 2. 循环:chat → 执行工具 → 回填 → 直到模型不再调工具
-        ctx = ToolContext(session=self.session, allowed_roots=self.allowed_roots)
+        ctx = ToolContext(session=self.session, allowed_roots=self.allowed_roots, scan_cap=self.scan_cap)
         final_text = ""
         for _ in range(MAX_TOOL_ITERATIONS):
             convo = [self._build_system(), *self.session.messages]
@@ -125,19 +132,21 @@ class Agent:
                 final_text = resp.text
                 break
 
-            # 逐个执行工具，结果作为 role=tool 消息回填
+            # 逐个执行工具:prepare（算清单）→ 确认 → execute
             for tc in resp.tool_calls:
                 emit({"type": "tool_call", "name": tc.name, "args": tc.arguments})
-                result = self._run_tool(tc, ctx, confirm_cb, emit)
+                summary, changed = self._run_tool(tc, ctx, confirm_cb, emit)
+                if changed:
+                    filesystem_changed = True
                 self.session.messages.append(
                     Message(
                         role="tool",
                         tool_call_id=tc.id,
                         tool_name=tc.name,
-                        content=result.summary,
+                        content=summary,
                     )
                 )
-                emit({"type": "tool_result", "name": tc.name, "summary": result.summary})
+                emit({"type": "tool_result", "name": tc.name, "summary": summary})
         else:
             # 达到迭代上限仍未收尾
             final_text = "（已达工具调用次数上限，本轮中止。）"
@@ -146,18 +155,54 @@ class Agent:
 
         # 3. 轮末检查上下文长度，必要时压缩
         self.maybe_compact()
-        return final_text
+        return final_text, filesystem_changed
 
-    def _run_tool(self, tc: ToolCall, ctx: ToolContext, confirm_cb, emit) -> tools.ToolResult:
-        """执行单个工具;破坏性工具先经确认（阶段 3 起生效）。"""
-        result = tools.dispatch(tc.name, tc.arguments, ctx)
-        if result.needs_confirmation:
-            approved = bool(confirm_cb and confirm_cb({"name": tc.name, "args": tc.arguments, "preview": result.summary}))
+    @staticmethod
+    def _write_succeeded(tool_name: str, summary: str) -> bool:
+        """写工具 execute 后是否实际改动了文件系统。"""
+        if tool_name == "copy_files":
+            return summary.startswith("已复制") and not summary.startswith("已复制 0")
+        if tool_name == "delete_files":
+            m = re.search(r"已删除 (\d+) 个", summary)
+            return bool(m and int(m.group(1)) > 0)
+        return False
+
+    def _needs_confirmation(self, preview) -> bool:
+        """确认策略。默认:所有操作都确认（最保守，用户选择）。
+
+        将来要放宽（如只确认写操作、本次会话免问），改这里即可，不动其它代码:
+            return preview.is_write                       # 只确认写操作
+            return preview.is_write and not self._session_allow_all
+        """
+        if self.confirm_mode == "none":
+            return False
+        if self.confirm_mode == "writes_only":
+            return preview.is_write
+        return True  # "all"（默认）
+
+    def _run_tool(self, tc: ToolCall, ctx: ToolContext, confirm_cb, emit) -> tuple[str, bool]:
+        """prepare → （护栏拦截则直接回错误）→ 确认 → execute，返回 (摘要, 是否写盘成功)。"""
+        preview = tools.prepare(tc.name, tc.arguments, ctx)
+
+        # 护栏完全拦截:无需确认，直接把原因回给模型
+        if preview.blocked:
+            return f"操作被拒绝:{preview.blocked_reason}\n{preview.description}", False
+
+        # 确认
+        if self._needs_confirmation(preview):
+            emit({"type": "confirm_request", "name": tc.name,
+                  "description": preview.description, "is_write": preview.is_write})
+            approved = bool(confirm_cb and confirm_cb({
+                "name": tc.name,
+                "description": preview.description,
+                "is_write": preview.is_write,
+            }))
             if not approved:
-                return tools.ToolResult(summary="用户取消了该操作。")
-            # 阶段 3:此处调用真正执行的二段函数。阶段 2 不会走到这里。
-            return result
-        return result
+                return "用户取消了该操作。", False
+
+        result = tools.execute(tc.name, tc.arguments, ctx, preview)
+        changed = tc.name in WRITE_TOOLS and self._write_succeeded(tc.name, result.summary)
+        return result.summary, changed
 
     # ---- 上下文压缩（方案 §5.4）----
     def maybe_compact(self) -> None:

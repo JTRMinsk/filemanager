@@ -41,8 +41,8 @@ def test_scan_filter_profile() -> None:
                 say("完成：已扫描并筛选出 txt 文件，画像已生成。"),
             ]
         )
-        agent = Agent(llm)
-        reply = agent.run_turn("帮我看看这个目录里的 txt")
+        agent = Agent(llm, confirm_mode="none")
+        reply, _ = agent.run_turn("帮我看看这个目录里的 txt")
 
         if agent.session.last_scan is None or len(agent.session.last_scan) != 3:
             _fail(f"last_scan 应为 3 个文件，实际 {len(agent.session.last_scan or [])}")
@@ -62,7 +62,7 @@ def test_preview_and_new_session() -> None:
         f.write_text("preview me")
 
         llm = MockLLMClient([call("preview_file", path=str(f)), say("已预览。")])
-        agent = Agent(llm)
+        agent = Agent(llm, confirm_mode="none")
         agent.run_turn("预览这个文件")
 
         if agent.session.last_scan is not None:
@@ -90,7 +90,7 @@ def test_context_compact() -> None:
             ]
         )
         llm.token_override = 99999  # 强制触发压缩
-        agent = Agent(llm, compact_threshold=100, keep_recent_turns=2)
+        agent = Agent(llm, compact_threshold=100, keep_recent_turns=2, confirm_mode="none")
 
         agent.run_turn("第一轮")
         n_after_first = len(agent.session.messages)
