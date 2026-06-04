@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from filemanager.agent import SessionState
 
 SAMPLE_SIZE = 30          # 摘要/清单里最多列举多少个文件名
-SCAN_CAP = 10000          # 扫描数量软上限
+SCAN_CAP = 500            # Agent scan_directory 扫描数量软上限
 WRITE_TOOLS = {"copy_files", "delete_files"}
 
 

@@ -257,8 +257,8 @@ class ChatPanel(QWidget):
         if reply:
             self._append_assistant(reply)
         self._set_busy(False)
-        if filesystem_changed:
-            self.files_changed.emit()
+        # if filesystem_changed:
+        #     self.files_changed.emit()  # 原：驱动右栏 ScanThread；现 Agent 与右栏解耦
 
     def _on_failed(self, msg: str) -> None:
         self._append_system(f"出错:{msg}")

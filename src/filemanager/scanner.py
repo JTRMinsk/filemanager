@@ -16,6 +16,9 @@ from PySide6.QtCore import QThread, Signal
 
 from filemanager.core import scan_directory
 
+# 右侧 GUI ScanThread 扫描数量上限（与 Agent tools.SCAN_CAP 独立配置）
+GUI_SCAN_MAX = 500
+
 
 class ScanThread(QThread):
     progress = Signal(int)
@@ -33,6 +36,7 @@ class ScanThread(QThread):
                 self._root,
                 self._recursive,
                 progress_cb=self.progress.emit,
+                max_files=GUI_SCAN_MAX,
             )
         except Exception as e:  # noqa: BLE001
             self.failed.emit(str(e))

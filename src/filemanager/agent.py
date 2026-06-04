@@ -64,7 +64,7 @@ class Agent:
         keep_recent_turns: int = 4,      # 压缩时保留最近多少条原始消息
         system_prompt: str = SYSTEM_PROMPT,
         confirm_mode: str = "all",       # "all"（默认，全部确认）| "writes_only" | "none"
-        scan_cap: int = 10000,           # 扫描数量软上限
+        scan_cap: int = 500,             # Agent scan_directory 扫描数量软上限（与 GUI 上限独立）
     ) -> None:
         self.llm = llm
         self.allowed_roots = allowed_roots or []

@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QDateTime, Qt, QItemSelection
-from PySide6.QtGui import QAction, QFontDatabase, QPixmap
+from PySide6.QtGui import QFontDatabase, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -33,7 +33,6 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStatusBar,
     QTableView,
-    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -55,7 +54,7 @@ from filemanager.fs_ops import (
     trash_paths,
 )
 from filemanager.profile import summarize_directory
-from filemanager.scanner import ScanThread
+from filemanager.scanner import ScanThread, GUI_SCAN_MAX
 from filemanager.table_model import ROLE_PATH, FileFilterProxy, FileTableModel
 
 _PREVIEW_IMAGE_MAX_EDGE = 480
@@ -88,7 +87,7 @@ class MainWindow(QMainWindow):
 
         self._chat = ChatPanel(allowed_roots=api_store.get_allowed_roots())
         self._chat.setMinimumWidth(280)
-        self._chat.files_changed.connect(self._start_scan)
+        # self._chat.files_changed.connect(self._start_scan)  # 原：Agent 改盘后刷新表格；现 Agent 与右栏解耦
         outer_splitter.addWidget(self._chat)
 
         right_pane = QWidget()
@@ -103,7 +102,8 @@ class MainWindow(QMainWindow):
         self._btn_scan = QPushButton("扫描")
         self._btn_scan.clicked.connect(self._start_scan)
         self._recursive = QCheckBox("包含子目录")
-        self._recursive.setChecked(True)
+        # self._recursive.setChecked(True)
+        self._recursive.setChecked(False)
         self._recursive.toggled.connect(lambda _on: self._sync_chat_ui_context())
         dir_row.addWidget(QLabel("根目录:"), 0)
         dir_row.addWidget(self._path_edit, 1)
@@ -227,12 +227,12 @@ class MainWindow(QMainWindow):
         outer_splitter.setSizes([360, max(self.width() - 360, 600)])
         outer.addWidget(outer_splitter)
 
-        # 工具栏 / 状态栏
-        bar = QToolBar()
-        act_rescan = QAction("重新扫描", self)
-        act_rescan.triggered.connect(self._start_scan)
-        bar.addAction(act_rescan)
-        self.addToolBar(bar)
+        # 工具栏（原「重新扫描」与顶栏「扫描」重复，已移除）
+        # bar = QToolBar()
+        # act_rescan = QAction("重新扫描", self)
+        # act_rescan.triggered.connect(self._start_scan)
+        # bar.addAction(act_rescan)
+        # self.addToolBar(bar)
 
         self._status = QStatusBar()
         self.setStatusBar(self._status)
@@ -315,7 +315,12 @@ class MainWindow(QMainWindow):
         self._apply_filters()
         text = summarize_directory(self._root, entries)
         self._profile_view.setPlainText(text)
-        self._status.showMessage(f"扫描完成：{len(entries)} 个文件。")
+        if len(entries) >= GUI_SCAN_MAX:
+            self._status.showMessage(
+                f"扫描完成：{len(entries)} 个文件（已达 GUI 上限 {GUI_SCAN_MAX}，可能还有更多）。"
+            )
+        else:
+            self._status.showMessage(f"扫描完成：{len(entries)} 个文件。")
         self._update_file_preview()
 
     def _on_table_selection_changed(self, selected: QItemSelection, deselected: QItemSelection) -> None:

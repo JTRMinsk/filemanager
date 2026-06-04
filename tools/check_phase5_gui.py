@@ -104,14 +104,12 @@ assert "scan_directory" in doc
 assert "42 个文件" in doc
 ok("用户气泡 / 工具调用 / 工具结果 / 助手回复 均渲染入消息流")
 
-print("== files_changed 仅在写操作后发出 ==")
+print("== Agent 不再 emit files_changed（与右栏 Scan 解耦）==")
 fs_signals: list[bool] = []
 panel.files_changed.connect(lambda: fs_signals.append(True))
-panel._on_finished("好的，请告诉我目录。", False)
-assert not fs_signals, "纯文本回复不应触发 files_changed"
 panel._on_finished("已删除。", True)
-assert fs_signals, "写操作成功后应触发 files_changed"
-ok("files_changed 条件触发正确")
+assert not fs_signals, "Agent 写操作不应再触发 files_changed"
+ok("files_changed 已从 Agent 路径断开")
 
 print("== UI 上下文注入 ==")
 panel.set_ui_context(Path("C:/test/root"), True)
