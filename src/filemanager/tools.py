@@ -205,6 +205,21 @@ def _prepare_delete(args, ctx) -> ToolPreview:
     )
 
 
+def _prepare_remember(args, ctx) -> ToolPreview:
+    text = (args.get("text") or "").strip()
+    if not text:
+        return ToolPreview(description="remember 缺少要记住的内容 text。", is_write=True,
+                           blocked=True, blocked_reason="未提供 text。")
+    section = (args.get("section") or "其它").strip()
+    # is_write=True:写入持久记忆，需确认（即便将来放宽到 writes_only 也会确认）
+    return ToolPreview(description=f"写入长期记忆 · 分类「{section}」:\n  {text}", is_write=True)
+
+
+def _prepare_recall(args, ctx) -> ToolPreview:
+    q = (args.get("query") or "").strip()
+    return ToolPreview(description=f"检索长期记忆:{q or '（全部）'}")
+
+
 _PREPARE = {
     "scan_directory": _prepare_scan,
     "filter_files": _prepare_filter,
@@ -212,6 +227,8 @@ _PREPARE = {
     "profile_directory": _prepare_profile,
     "copy_files": _prepare_copy,
     "delete_files": _prepare_delete,
+    "remember": _prepare_remember,
+    "recall": _prepare_recall,
 }
 
 
@@ -343,6 +360,27 @@ def _exec_delete(args, ctx, prep) -> ToolResult:
     return ToolResult(summary=msg)
 
 
+def _exec_remember(args, ctx, prep) -> ToolResult:
+    from filemanager import memory
+
+    text = (args.get("text") or "").strip()
+    if not text:
+        return ToolResult(summary="未记录:内容为空。")
+    section = (args.get("section") or "其它").strip()
+    memory.append(text, section)
+    return ToolResult(summary=f"已记住（{section}）:{text}")
+
+
+def _exec_recall(args, ctx, prep) -> ToolResult:
+    from filemanager import memory
+
+    items = memory.search(args.get("query", "") or "")
+    if not items:
+        return ToolResult(summary="长期记忆里没有相关条目。")
+    body = "\n".join(f"- {it}" for it in items)
+    return ToolResult(summary=f"相关记忆:\n{body}")
+
+
 _EXECUTE = {
     "scan_directory": _exec_scan,
     "filter_files": _exec_filter,
@@ -350,6 +388,8 @@ _EXECUTE = {
     "profile_directory": _exec_profile,
     "copy_files": _exec_copy,
     "delete_files": _exec_delete,
+    "remember": _exec_remember,
+    "recall": _exec_recall,
 }
 
 
@@ -413,6 +453,24 @@ def _build_specs() -> list:
             description="删除文件（本地固定盘进回收站，可移动/网络/光驱卷永久删除）。默认作用于当前筛选/扫描结果，也可用 paths 指定。需用户确认。",
             parameters={"type": "object", "properties": {
                 "paths": {"type": "array", "items": {"type": "string"}, "description": "可选:明确指定要删除的文件路径;不填则用当前工作集。"},
+            }},
+        ),
+        ToolSpec(
+            name="remember",
+            description=(
+                "把一条值得长期记住的信息写入长期记忆（跨会话保留），如用户偏好、目录用途、工作习惯。"
+                "用户明确要求记住时，或你判断某信息长期有用时调用。会请用户确认后才写入。"
+            ),
+            parameters={"type": "object", "properties": {
+                "text": {"type": "string", "description": "要记住的内容，一句话。"},
+                "section": {"type": "string", "description": "分类，如 用户偏好/目录备注/工作习惯;可省略。"},
+            }, "required": ["text"]},
+        ),
+        ToolSpec(
+            name="recall",
+            description="检索长期记忆。需要回忆用户偏好或之前记下的信息时调用。",
+            parameters={"type": "object", "properties": {
+                "query": {"type": "string", "description": "检索关键词;留空返回全部记忆。"},
             }},
         ),
     ]

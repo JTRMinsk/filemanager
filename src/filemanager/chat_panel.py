@@ -58,12 +58,15 @@ class ChatPanel(QWidget):
         self._status.setStyleSheet("color: gray; font-size: 11px;")
         btn_settings = QPushButton("设置")
         btn_settings.clicked.connect(self._open_settings)
+        btn_memory = QPushButton("记忆")
+        btn_memory.clicked.connect(self._open_memory)
         btn_new = QPushButton("新会话")
         btn_new.clicked.connect(self._new_session)
         top.addWidget(QLabel("助手"))
         top.addStretch(1)
         top.addWidget(self._status)
         top.addWidget(btn_settings)
+        top.addWidget(btn_memory)
         top.addWidget(btn_new)
         v.addLayout(top)
 
@@ -176,6 +179,11 @@ class ChatPanel(QWidget):
         dlg.exec()
         self.set_allowed_roots(api_store.get_allowed_roots())
         self._refresh_status()
+
+    def _open_memory(self) -> None:
+        from filemanager.memory_dialog import MemoryDialog
+
+        MemoryDialog(self).exec()
 
     def _new_session(self) -> None:
         if self._agent is not None:

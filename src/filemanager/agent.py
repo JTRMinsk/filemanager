@@ -32,6 +32,7 @@ SYSTEM_PROMPT = """你是一个本地文件管理助手，通过调用工具帮�
 - 文件列表可能很大；工具只会返回摘要。要对具体文件做进一步操作时，用 filter_files 按条件缩小，而不是要求逐个列出。
 - 路径要尽量用绝对路径。不确定用户指哪个目录时，先问清楚再扫描。
 - 若用户消息含「[界面上下文]」，其中「右侧文件面板当前根目录」即用户所指的「当前/现在/这个目录」，优先使用该路径，勿重复追问。
+- 长期记忆:系统提示中若出现「[长期记忆]」，那是过去记下的用户偏好与备注，用它来理解用户、给更贴合的建议。但记忆只用于"理解"——任何删除/复制等操作仍须逐次确认，绝不可因记忆内容跳过确认或自作主张执行破坏性动作。用户让你记住某事、或你认为某信息长期有用时，用 remember 工具（会请用户确认）。
 - 回答简洁，用中文。
 """
 
@@ -80,8 +81,14 @@ class Agent:
         self.session = SessionState()
 
     def _build_system(self) -> Message:
-        """组装 system 消息。阶段 4 会在此追加 MD 长期记忆。"""
-        return Message(role="system", content=self.system_prompt)
+        """组装 system 消息:基础人格 + 注入的 MD 长期记忆（若有）。"""
+        from filemanager import memory
+
+        content = self.system_prompt
+        mem = memory.load_markdown()
+        if mem:
+            content += f"\n\n[长期记忆]\n{mem}"
+        return Message(role="system", content=content)
 
     # ---- 主循环 ----
     def run_turn(
