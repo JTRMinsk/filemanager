@@ -38,6 +38,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from filemanager.core import (
+    IMAGE_SUFFIXES,
+    PREVIEW_HEX_BYTES,
+    PREVIEW_MAX_TEXT_BYTES,
+    _format_hex_preview,
+    _is_probably_text,
+    parse_mb,
+)
 from filemanager.fs_ops import (
     copy_paths,
     delete_paths_permanent,
@@ -48,48 +56,7 @@ from filemanager.profile import summarize_directory
 from filemanager.scanner import ScanThread
 from filemanager.table_model import ROLE_PATH, FileFilterProxy, FileTableModel
 
-# 预览：限制读盘大小，避免超大文本一次性读入内存拖垮界面
-_PREVIEW_MAX_TEXT_BYTES = 512 * 1024
-_PREVIEW_HEX_BYTES = 4096
 _PREVIEW_IMAGE_MAX_EDGE = 480
-_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"})
-
-
-def _parse_mb(s: str) -> int | None:
-    """将筛选框中的「MB」小数字符串转为字节数（int）；空或非数字返回 None。"""
-    s = s.strip()
-    if not s:
-        return None
-    try:
-        v = float(s)
-    except ValueError:
-        return None
-    return int(v * 1024 * 1024)
-
-
-def _is_probably_text(sample: bytes) -> bool:
-    """启发式判断字节块是否像文本：前 8KB 内 NUL 则判二进制；可打印 ASCII 比例 ≥ 85% 则判文本。
-
-    用于决定预览区用 UTF-8 解码还是十六进制栅栏视图。"""
-    if not sample:
-        return True
-    if b"\x00" in sample[:8192]:
-        return False
-    chunk = sample[:8192]
-    printable = sum(1 for b in chunk if 32 <= b < 127 or b in (9, 10, 13))
-    return printable / len(chunk) >= 0.85
-
-
-def _format_hex_preview(data: bytes, limit: int) -> str:
-    """经典 hex dump：偏移 + 十六进制 + ASCII 列，仅展示前 limit 字节。"""
-    chunk = data[:limit]
-    lines: list[str] = []
-    for i in range(0, len(chunk), 16):
-        part = chunk[i : i + 16]
-        hx = " ".join(f"{b:02x}" for b in part)
-        asc = "".join(chr(b) if 32 <= b < 127 else "." for b in part)
-        lines.append(f"{i:08x}  {hx:<47}  {asc}")
-    return "\n".join(lines)
 
 
 class MainWindow(QMainWindow):
@@ -262,8 +229,8 @@ class MainWindow(QMainWindow):
 
     def _apply_filters(self) -> None:
         """把表单条件推入代理模型；扫描结束与手动点「应用筛选」都会调用。"""
-        mn = _parse_mb(self._filt_min_mb.text())
-        mx = _parse_mb(self._filt_max_mb.text())
+        mn = parse_mb(self._filt_min_mb.text())
+        mx = parse_mb(self._filt_max_mb.text())
         mt_min = (
             float(self._filt_mtime_from.dateTime().toSecsSinceEpoch())
             if self._filt_mtime_from_en.isChecked()
@@ -362,7 +329,7 @@ class MainWindow(QMainWindow):
             return
 
         suffix = path.suffix.lower()
-        if suffix in _IMAGE_SUFFIXES:
+        if suffix in IMAGE_SUFFIXES:
             pix = QPixmap(str(path))
             if pix.isNull():
                 self._preview_placeholder.setText("无法作为位图加载（可能已损坏或缺少格式插件）。")
@@ -385,7 +352,7 @@ class MainWindow(QMainWindow):
             self._preview_stack.setCurrentWidget(self._preview_placeholder)
             return
 
-        read_size = min(size, _PREVIEW_MAX_TEXT_BYTES)
+        read_size = min(size, PREVIEW_MAX_TEXT_BYTES)
         try:
             with path.open("rb") as f:
                 raw = f.read(read_size)
@@ -402,8 +369,8 @@ class MainWindow(QMainWindow):
             text = raw.decode("utf-8", errors="replace") + note_truncate
             self._preview_text.setPlainText(text)
         else:
-            hex_part = _format_hex_preview(raw, _PREVIEW_HEX_BYTES)
-            if len(raw) > _PREVIEW_HEX_BYTES:
+            hex_part = _format_hex_preview(raw, PREVIEW_HEX_BYTES)
+            if len(raw) > PREVIEW_HEX_BYTES:
                 hex_part += "\n…（十六进制视图已截断）"
             self._preview_text.setPlainText(
                 "（二进制/非文本推测）\n\n" + hex_part + note_truncate
