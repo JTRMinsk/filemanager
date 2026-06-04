@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from filemanager.chat_panel import ChatPanel
 from filemanager.core import (
     IMAGE_SUFFIXES,
     PREVIEW_HEX_BYTES,
@@ -65,7 +66,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("FileManager — 本地文件批量管理")
-        self.resize(1200, 720)
+        self.resize(1400, 720)
 
         self._root = Path.home()
         # 源模型存绝对路径列表；代理模型包一层筛选/排序
@@ -79,7 +80,18 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
-        root_layout = QVBoxLayout(central)
+        outer = QHBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        outer_splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        self._chat = ChatPanel()
+        self._chat.setMinimumWidth(280)
+        self._chat.files_changed.connect(self._start_scan)
+        outer_splitter.addWidget(self._chat)
+
+        right_pane = QWidget()
+        root_layout = QVBoxLayout(right_pane)
 
         # ---------- 顶栏：根路径 + 是否递归 + 扫描 ----------
         dir_row = QHBoxLayout()
@@ -205,6 +217,12 @@ class MainWindow(QMainWindow):
         splitter.addWidget(right)
         splitter.setSizes([780, 420])
         root_layout.addWidget(splitter, 1)
+
+        outer_splitter.addWidget(right_pane)
+        outer_splitter.setStretchFactor(0, 0)
+        outer_splitter.setStretchFactor(1, 1)
+        outer_splitter.setSizes([360, max(self.width() - 360, 600)])
+        outer.addWidget(outer_splitter)
 
         # 工具栏 / 状态栏
         bar = QToolBar()

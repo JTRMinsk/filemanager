@@ -11,6 +11,8 @@ dependencies = [
 
 [project.optional-dependencies]
 pack = ["pyinstaller>=6.0,<8"]
+anthropic = ["anthropic>=0.40"]
+openai = ["openai>=1.50"]
 [project.scripts]
 filemanager = "filemanager.main:main"
 

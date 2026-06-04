@@ -19,11 +19,12 @@ DEFAULT_MODEL = "claude-sonnet-4-20250514"
 
 
 class AnthropicClient(LLMClient):
-    def __init__(self, model: str = DEFAULT_MODEL, max_tokens: int = 2048) -> None:
+    def __init__(self, model: str = DEFAULT_MODEL, max_tokens: int = 2048, api_key: str = "") -> None:
         import anthropic  # 延迟导入,未选用此后端时不强制安装
 
         self._anthropic = anthropic
-        self._client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        # 显式传入的 key（GUI 选中的配置）优先;否则回退环境变量（命令行用）
+        self._client = anthropic.Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
         self.model = model
         self.max_tokens = max_tokens
 
