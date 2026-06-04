@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QDateTime, Qt, QItemSelection
-from PySide6.QtGui import QAction, QFontDatabase, QPixmap
+from PySide6.QtGui import QFontDatabase, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -33,11 +33,20 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStatusBar,
     QTableView,
-    QToolBar,
     QVBoxLayout,
     QWidget,
 )
 
+from filemanager.chat_panel import ChatPanel
+from filemanager import api_store
+from filemanager.core import (
+    IMAGE_SUFFIXES,
+    PREVIEW_HEX_BYTES,
+    PREVIEW_MAX_TEXT_BYTES,
+    _format_hex_preview,
+    _is_probably_text,
+    parse_mb,
+)
 from filemanager.fs_ops import (
     copy_paths,
     delete_paths_permanent,
@@ -45,51 +54,10 @@ from filemanager.fs_ops import (
     trash_paths,
 )
 from filemanager.profile import summarize_directory
-from filemanager.scanner import ScanThread
+from filemanager.scanner import ScanThread, GUI_SCAN_MAX
 from filemanager.table_model import ROLE_PATH, FileFilterProxy, FileTableModel
 
-# 预览：限制读盘大小，避免超大文本一次性读入内存拖垮界面
-_PREVIEW_MAX_TEXT_BYTES = 512 * 1024
-_PREVIEW_HEX_BYTES = 4096
 _PREVIEW_IMAGE_MAX_EDGE = 480
-_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"})
-
-
-def _parse_mb(s: str) -> int | None:
-    """将筛选框中的「MB」小数字符串转为字节数（int）；空或非数字返回 None。"""
-    s = s.strip()
-    if not s:
-        return None
-    try:
-        v = float(s)
-    except ValueError:
-        return None
-    return int(v * 1024 * 1024)
-
-
-def _is_probably_text(sample: bytes) -> bool:
-    """启发式判断字节块是否像文本：前 8KB 内 NUL 则判二进制；可打印 ASCII 比例 ≥ 85% 则判文本。
-
-    用于决定预览区用 UTF-8 解码还是十六进制栅栏视图。"""
-    if not sample:
-        return True
-    if b"\x00" in sample[:8192]:
-        return False
-    chunk = sample[:8192]
-    printable = sum(1 for b in chunk if 32 <= b < 127 or b in (9, 10, 13))
-    return printable / len(chunk) >= 0.85
-
-
-def _format_hex_preview(data: bytes, limit: int) -> str:
-    """经典 hex dump：偏移 + 十六进制 + ASCII 列，仅展示前 limit 字节。"""
-    chunk = data[:limit]
-    lines: list[str] = []
-    for i in range(0, len(chunk), 16):
-        part = chunk[i : i + 16]
-        hx = " ".join(f"{b:02x}" for b in part)
-        asc = "".join(chr(b) if 32 <= b < 127 else "." for b in part)
-        lines.append(f"{i:08x}  {hx:<47}  {asc}")
-    return "\n".join(lines)
 
 
 class MainWindow(QMainWindow):
@@ -98,7 +66,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("FileManager — 本地文件批量管理")
-        self.resize(1200, 720)
+        self.resize(1400, 720)
 
         self._root = Path.home()
         # 源模型存绝对路径列表；代理模型包一层筛选/排序
@@ -112,7 +80,18 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
-        root_layout = QVBoxLayout(central)
+        outer = QHBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        outer_splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        self._chat = ChatPanel(allowed_roots=api_store.get_allowed_roots())
+        self._chat.setMinimumWidth(280)
+        # self._chat.files_changed.connect(self._start_scan)  # 原：Agent 改盘后刷新表格；现 Agent 与右栏解耦
+        outer_splitter.addWidget(self._chat)
+
+        right_pane = QWidget()
+        root_layout = QVBoxLayout(right_pane)
 
         # ---------- 顶栏：根路径 + 是否递归 + 扫描 ----------
         dir_row = QHBoxLayout()
@@ -123,13 +102,16 @@ class MainWindow(QMainWindow):
         self._btn_scan = QPushButton("扫描")
         self._btn_scan.clicked.connect(self._start_scan)
         self._recursive = QCheckBox("包含子目录")
-        self._recursive.setChecked(True)
+        # self._recursive.setChecked(True)
+        self._recursive.setChecked(False)
+        self._recursive.toggled.connect(lambda _on: self._sync_chat_ui_context())
         dir_row.addWidget(QLabel("根目录:"), 0)
         dir_row.addWidget(self._path_edit, 1)
         dir_row.addWidget(btn_browse, 0)
         dir_row.addWidget(self._recursive, 0)
         dir_row.addWidget(self._btn_scan, 0)
         root_layout.addLayout(dir_row)
+        self._sync_chat_ui_context()
 
         # ---------- 筛选：只影响代理层，不删源数据 ----------
         filt = QGroupBox("筛选（应用于当前扫描结果）")
@@ -239,12 +221,18 @@ class MainWindow(QMainWindow):
         splitter.setSizes([780, 420])
         root_layout.addWidget(splitter, 1)
 
-        # 工具栏 / 状态栏
-        bar = QToolBar()
-        act_rescan = QAction("重新扫描", self)
-        act_rescan.triggered.connect(self._start_scan)
-        bar.addAction(act_rescan)
-        self.addToolBar(bar)
+        outer_splitter.addWidget(right_pane)
+        outer_splitter.setStretchFactor(0, 0)
+        outer_splitter.setStretchFactor(1, 1)
+        outer_splitter.setSizes([360, max(self.width() - 360, 600)])
+        outer.addWidget(outer_splitter)
+
+        # 工具栏（原「重新扫描」与顶栏「扫描」重复，已移除）
+        # bar = QToolBar()
+        # act_rescan = QAction("重新扫描", self)
+        # act_rescan.triggered.connect(self._start_scan)
+        # bar.addAction(act_rescan)
+        # self.addToolBar(bar)
 
         self._status = QStatusBar()
         self.setStatusBar(self._status)
@@ -255,6 +243,11 @@ class MainWindow(QMainWindow):
         if d:
             self._root = Path(d)
             self._path_edit.setText(d)
+            self._sync_chat_ui_context()
+
+    def _sync_chat_ui_context(self) -> None:
+        """把右侧文件面板根目录同步给对话栏 Agent 上下文。"""
+        self._chat.set_ui_context(self._current_root(), self._recursive.isChecked())
 
     def _current_root(self) -> Path:
         """从输入框解析当前「要扫描的根」；空则当作当前目录 ``.``。"""
@@ -262,8 +255,8 @@ class MainWindow(QMainWindow):
 
     def _apply_filters(self) -> None:
         """把表单条件推入代理模型；扫描结束与手动点「应用筛选」都会调用。"""
-        mn = _parse_mb(self._filt_min_mb.text())
-        mx = _parse_mb(self._filt_max_mb.text())
+        mn = parse_mb(self._filt_min_mb.text())
+        mx = parse_mb(self._filt_max_mb.text())
         mt_min = (
             float(self._filt_mtime_from.dateTime().toSecsSinceEpoch())
             if self._filt_mtime_from_en.isChecked()
@@ -296,6 +289,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "路径无效", f"不是有效目录：\n{root}")
             return
         self._root = root.resolve()
+        self._sync_chat_ui_context()
         self._model.set_root(self._root)
         self._btn_scan.setEnabled(False)
         self._status.showMessage("正在扫描…")
@@ -321,7 +315,12 @@ class MainWindow(QMainWindow):
         self._apply_filters()
         text = summarize_directory(self._root, entries)
         self._profile_view.setPlainText(text)
-        self._status.showMessage(f"扫描完成：{len(entries)} 个文件。")
+        if len(entries) >= GUI_SCAN_MAX:
+            self._status.showMessage(
+                f"扫描完成：{len(entries)} 个文件（已达 GUI 上限 {GUI_SCAN_MAX}，可能还有更多）。"
+            )
+        else:
+            self._status.showMessage(f"扫描完成：{len(entries)} 个文件。")
         self._update_file_preview()
 
     def _on_table_selection_changed(self, selected: QItemSelection, deselected: QItemSelection) -> None:
@@ -362,7 +361,7 @@ class MainWindow(QMainWindow):
             return
 
         suffix = path.suffix.lower()
-        if suffix in _IMAGE_SUFFIXES:
+        if suffix in IMAGE_SUFFIXES:
             pix = QPixmap(str(path))
             if pix.isNull():
                 self._preview_placeholder.setText("无法作为位图加载（可能已损坏或缺少格式插件）。")
@@ -385,7 +384,7 @@ class MainWindow(QMainWindow):
             self._preview_stack.setCurrentWidget(self._preview_placeholder)
             return
 
-        read_size = min(size, _PREVIEW_MAX_TEXT_BYTES)
+        read_size = min(size, PREVIEW_MAX_TEXT_BYTES)
         try:
             with path.open("rb") as f:
                 raw = f.read(read_size)
@@ -402,8 +401,8 @@ class MainWindow(QMainWindow):
             text = raw.decode("utf-8", errors="replace") + note_truncate
             self._preview_text.setPlainText(text)
         else:
-            hex_part = _format_hex_preview(raw, _PREVIEW_HEX_BYTES)
-            if len(raw) > _PREVIEW_HEX_BYTES:
+            hex_part = _format_hex_preview(raw, PREVIEW_HEX_BYTES)
+            if len(raw) > PREVIEW_HEX_BYTES:
                 hex_part += "\n…（十六进制视图已截断）"
             self._preview_text.setPlainText(
                 "（二进制/非文本推测）\n\n" + hex_part + note_truncate

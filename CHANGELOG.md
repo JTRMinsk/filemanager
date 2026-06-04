@@ -2,6 +2,38 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.0] — 2026-06-04
+
+### Added
+
+- **Agent 对话面板**（窗口左侧）：自然语言驱动扫描、筛选、预览、复制、删除；支持 DeepSeek / OpenAI 兼容 API / Anthropic（可选依赖）。
+- **LLM 抽象层**（`llm/`）、**工具层**（`tools.py`）、**Agent 主循环**（`agent.py`）；离线验收脚本 `tools/check_phase2.py` … `check_phase5_gui.py`。
+- **写操作两段式确认**：黄色确认卡片（含跨线程 `AgentThread`）；`confirm_mode=all` 时只读工具亦需确认。
+- **路径护栏**（`guard.py`）、**操作日志**（`oplog.py` → `%APPDATA%\filemanager\memory.db`）。
+- **API 配置**（`api_store.py` + 设置对话框）：多 profile、`allowed_roots` 白名单。
+- **长期记忆**（`memory.py` + 「记忆」对话框）：`remember` / `recall` 工具，写入需确认；记忆注入系统提示，**不能**绕过删除确认。
+- **`core.py`**：扫描 / 筛选 / 预览纯函数，供 GUI 与 Agent 共用。
+
+### Changed
+
+- **主界面布局**：左栏 Agent，右栏保留原有扫描 / 筛选 / 表格 / 预览 / 画像 / 手动复制删除。
+- **两条扫描管线独立**：
+  - **右侧 GUI**（`ScanThread`）：上限 `GUI_SCAN_MAX = 500`（`scanner.py`）；默认**不勾选**「包含子目录」。
+  - **Agent** `scan_directory`：上限 `SCAN_CAP = 500`（`tools.py`），与 GUI **分开配置**。
+- **Agent 不再触发右侧 rescan**：`copy_files` / `delete_success` 后不再 `files_changed → _start_scan`；右栏仅在用户点「扫描」或手动复制/删除后刷新列表。
+- **界面上下文**：Agent 消息附带右侧当前根目录，便于理解「现在目录」。
+- 移除顶栏冗余 **「重新扫描」** 工具栏（与根目录行「扫描」重复）。
+
+### Fixed
+
+- Agent 纯文本回复（如追问目录）误触发右侧对用户主目录的递归全盘扫描。
+- `MainWindow` 启动时 `_sync_chat_ui_context` 调用顺序（须在 `_path_edit` 创建之后）。
+
+### Notes
+
+- 用户数据（配置、记忆、日志）均在 `%APPDATA%\filemanager\`（安装版与便携版共享，不随 exe 目录走）。详见 `AGENTS.md`。
+- 可选 LLM 依赖：`pip install -e ".[openai]"` 或 `".[anthropic]"`。
+
 ## [0.3.1] — 2026-05-11
 
 ### Fixed

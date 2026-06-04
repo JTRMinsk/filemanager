@@ -14,7 +14,10 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
-from filemanager.models import FileEntry
+from filemanager.core import scan_directory
+
+# 右侧 GUI ScanThread 扫描数量上限（与 Agent tools.SCAN_CAP 独立配置）
+GUI_SCAN_MAX = 500
 
 
 class ScanThread(QThread):
@@ -28,43 +31,14 @@ class ScanThread(QThread):
         self._recursive = recursive
 
     def run(self) -> None:
-        root = self._root.resolve()
-        entries: list[FileEntry] = []
         try:
-            if self._recursive:
-                # rglob("*") 会递归所有子路径；仅保留 is_file()，目录不作为表格行
-                for p in root.rglob("*"):
-                    if not p.is_file():
-                        continue
-                    try:
-                        st = p.stat()
-                        entries.append(FileEntry(path=p, size=st.st_size, mtime=st.st_mtime))
-                    except OSError:
-                        # 单个文件 stat 失败（被删、无权限）则跳过，继续扫其它文件
-                        continue
-                    if len(entries) % 500 == 0:
-                        self.progress.emit(len(entries))
-            else:
-                # 仅一层：iterdir 不递归，适合快速浏览单层目录
-                try:
-                    it = root.iterdir()
-                except OSError as e:
-                    self.failed.emit(str(e))
-                    return
-                for p in it:
-                    if not p.is_file():
-                        continue
-                    try:
-                        st = p.stat()
-                        entries.append(FileEntry(path=p, size=st.st_size, mtime=st.st_mtime))
-                    except OSError:
-                        continue
-                    if len(entries) % 500 == 0:
-                        self.progress.emit(len(entries))
+            entries = scan_directory(
+                self._root,
+                self._recursive,
+                progress_cb=self.progress.emit,
+                max_files=GUI_SCAN_MAX,
+            )
         except Exception as e:  # noqa: BLE001
-            # 顶层异常（例如 rglob 过程中罕见错误）：整体失败并通知 UI
             self.failed.emit(str(e))
             return
-
-        self.progress.emit(len(entries))
         self.finished_ok.emit(entries)

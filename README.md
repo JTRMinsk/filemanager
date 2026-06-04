@@ -1,6 +1,6 @@
 # FileManager
 
-Desktop file utility: scan a root folder, filter and sort files, multi-select batches, copy or delete (Recycle Bin on fixed local drives on Windows; permanent delete on removable/network/CD volumes with a warning), and show a lightweight “directory profile” (heuristic).
+Desktop file utility with an optional **AI Agent** side panel: scan a root folder, filter and sort files, multi-select batches, copy or delete (Recycle Bin on fixed local drives on Windows; permanent delete on removable/network/CD volumes with a warning), directory profile (heuristic), and natural-language file operations via configured LLM.
 
 ---
 
@@ -8,76 +8,179 @@ Desktop file utility: scan a root folder, filter and sort files, multi-select ba
 
 ### Overview
 
-FileManager is a **PySide6 (Qt for Python)** GUI. You pick a directory, optionally include subfolders, then the app walks the tree and lists **files only** (directories are not listed as rows). Filters narrow the list; sorting uses the table headers. When **exactly one file** is selected, a side panel shows a quick preview (common images, text up to a size cap, or a hex snippet). Batch actions operate on the current selection (or “select all visible” after filtering).
+FileManager is a **PySide6 (Qt for Python)** app with two parallel entry points:
 
-### Design principles
+| Area | Role |
+|------|------|
+| **Left — Chat panel** | Agent: scan / filter / preview / copy / delete / remember preferences via tools + confirmation cards. |
+| **Right — Classic UI** | Original file manager: root path, **Scan** button, filters, table, preview, profile, manual copy/delete. |
 
-- **UI thread stays responsive**: filesystem walks run in a `QThread` (`ScanThread`); results are applied when the scan finishes.
-- **Model / view separation**: `FileTableModel` (`QAbstractTableModel`) holds scanned entries; `FileFilterProxy` (`QSortFilterProxyModel`) handles filtering and stable sorting for size/time columns via `lessThan`.
-- **Safe deletes**: On **Windows**, fixed local drives use `send2trash` (Recycle Bin). **Removable, network, and CD-ROM volumes** are treated as “no reliable Recycle Bin”: the app warns and **permanently deletes** with `unlink`. Other platforms still use `send2trash` for all paths (subject to OS rules).
-- **Directory profile is non-authoritative**: rules + extension statistics only—useful hints, not classification ground truth.
+The two **do not share scan state**: Agent results live in session memory; the table shows only what the right panel has scanned.
+
+### Quick start — GitHub to running
+
+**Prerequisites:** Git, **Python 3.10+** (`python --version`), network for `pip`.
+
+#### 1. Get the code
+
+```bash
+git clone https://github.com/JTRMinsk/filemanager.git
+cd filemanager
+git checkout agentization   # Agent features; use main/master if that is your default branch
+```
+
+#### 2. Virtual environment (recommended)
+
+Windows (PowerShell):
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+macOS / Linux:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+#### 3. Install dependencies
+
+**Right panel only** (scan / filter / copy / delete — no Agent chat):
+
+```bash
+pip install -e .
+```
+
+**With Agent** (pick one LLM backend):
+
+```bash
+pip install -e ".[openai]"      # DeepSeek / OpenAI-compatible API
+# pip install -e ".[anthropic]" # Claude
+```
+
+#### 4. Launch
+
+```bash
+python -m filemanager
+```
+
+Or, if `Scripts` is on `PATH`: `filemanager`
+
+#### 5. First-time UI workflow
+
+| Step | Where | Action |
+|------|--------|--------|
+| 1 | Left — **Settings** | Add a profile (name, backend, model, API key). DeepSeek: backend `deepseek`, Base URL can stay default. Click save; pick as active. |
+| 2 | Right — **Root path** | Enter or browse the folder to manage (e.g. `D:\Projects`). |
+| 3 | Right — **Scan** | Click **Scan** (optionally check “Include subfolders”; default is off). Table fills up to **500** files. |
+| 4 | Right | Use filters, preview (single select), **Copy to…** / **Delete selected** as needed. |
+| 5 | Left — chat | Describe tasks in plain language; yellow **confirm** cards appear before writes (copy/delete/remember). |
+| 6 | Left — **Memory** | Optional: view/edit long-term notes (`%APPDATA%\filemanager\memory.md`). |
+
+Config, memory, and logs live under **`%APPDATA%\filemanager\`** on Windows (or the platform equivalent) — **not** beside the `.exe`.
+
+#### 6. Verify (optional, no API key)
+
+From repo root:
+
+```bash
+python tools/check_phase2.py
+python tools/check_phase3.py
+python tools/check_phase4.py
+```
+
+GUI smoke (offscreen):
+
+```bash
+# Windows PowerShell:
+$env:QT_QPA_PLATFORM = "offscreen"; python tools/check_phase5_gui.py
+
+# macOS / Linux:
+QT_QPA_PLATFORM=offscreen python tools/check_phase5_gui.py
+```
+
+#### 7. Package for distribution (optional)
+
+Install pack tooling **and** LLM extra if the built app should use Agent:
+
+```bash
+pip install -e ".[pack,openai]"
+# or: pip install -e ".[pack,anthropic]"
+```
+
+From repo root:
+
+```bash
+python -m PyInstaller filemanager.spec --noconfirm
+```
+
+Output: **`dist/FileManager/`** — ship the **whole folder** (includes `FileManager.exe` and Qt runtime).
+
+**End user:** copy `dist/FileManager/` to target PC → run `FileManager.exe` → configure API in Settings (same `%APPDATA%` config as dev runs).
+
+---
+
+### Scan behaviour (important)
+
+Two independent pipelines, **each capped at 500 files** (separate constants):
+
+| Pipeline | Constant | Where |
+|----------|----------|--------|
+| Right GUI `ScanThread` | `GUI_SCAN_MAX = 500` | `scanner.py` |
+| Agent `scan_directory` tool | `SCAN_CAP = 500` | `tools.py` |
+
+- **Default**: “Include subfolders” is **unchecked** on the right panel (single-level scan unless you enable recursion).
+- **Agent copy/delete does not auto-rescan** the right table; use **Scan** manually if you need the table refreshed.
+- When a scan hits the 500 limit, the status bar notes that more files may exist.
+
+### Agent & configuration
+
+- **Settings** (chat panel): add API profiles (DeepSeek / OpenAI-compatible / Anthropic / Ollama placeholder).
+- **Memory** button: view/edit long-term notes in `%APPDATA%\filemanager\memory.md`.
+- **Allowed roots** (optional): empty = user home subtree only for Agent writes; configurable in Settings.
+- User data (config, memory, operation log) always under **`%APPDATA%\filemanager\`** — not next to the `.exe`.
+
+Destructive Agent actions require **confirmation** in the chat panel. Memory helps the model understand preferences but **does not** skip delete/copy confirmation.
+
+### Design principles (classic UI)
+
+- **UI thread stays responsive**: filesystem walks run in `QThread` (`ScanThread`).
+- **Model / view separation**: `FileTableModel` + `FileFilterProxy`.
+- **Safe deletes**: Windows fixed drives → Recycle Bin; removable/network/CD → permanent delete with warning.
+- **Directory profile is non-authoritative**: heuristic hints only.
 
 ### Core components
 
 | Module | Responsibility |
 |--------|----------------|
-| `main.py` | Application entry: `QApplication`, `MainWindow`, `sys.exit(app.exec())`. |
-| `window.py` | `MainWindow`: path input, scan controls, filter form, `QTableView`, single-file preview panel, profile panel, copy/trash actions. |
-| `models.py` | `FileEntry` dataclass: absolute `path`, `size`, `mtime`; helpers for name/suffix/relative path. |
-| `table_model.py` | `FileTableModel` columns and `Qt.UserRole` fields for path/size/suffix/time; `FileFilterProxy` for extensions, size range, name substring, mtime range. |
-| `scanner.py` | `ScanThread`: recursive `rglob` or single-level `iterdir`, emits file list or errors. |
-| `profile.py` | `summarize_directory`: extension histogram, coarse “topic” guesses, root markers (`package.json`, etc.). |
-| `fs_ops.py` | `copy_paths`; `trash_paths` (`send2trash`) for fixed local volumes on Windows; `delete_paths_permanent`; `path_expects_recycle_bin` (drive-type heuristic for removable/network/CD). |
-| `__main__.py` | Allows `python -m filemanager`. |
+| `main.py` / `window.py` | Entry; split layout (chat + classic UI). |
+| `chat_panel.py` / `agent_thread.py` | Agent UI and background LLM turns. |
+| `agent.py` / `tools.py` / `llm/` | Agent loop, tool registry, LLM adapters. |
+| `core.py` | Pure scan / filter / preview (shared by GUI and Agent). |
+| `scanner.py` | `ScanThread` for the right panel (`GUI_SCAN_MAX`). |
+| `guard.py` / `oplog.py` / `memory.py` | Write guards, operation log, MD memory. |
+| `models.py` / `table_model.py` / `profile.py` / `fs_ops.py` | Unchanged core file ops and table model. |
+
+See `AGENTS.md` for full agentization architecture.
 
 ### Repository layout
 
 ```text
 filemanager/
-  pyproject.toml          # deps + optional [pack] for PyInstaller
-  filemanager.spec        # PyInstaller spec (folder bundle layout)
-  CHANGELOG.md            # version history
-  README.md               # this document
-  src/
-    filemanager/
-      __init__.py
-      __main__.py
-      main.py
-      window.py
-      models.py
-      table_model.py
-      scanner.py
-      profile.py
-      fs_ops.py
-  build/                  # PyInstaller intermediates (generated)
-  dist/                   # packaged output (generated)
+  pyproject.toml
+  CHANGELOG.md
+  README.md
+  AGENTS.md                 # Agent implementation spec
+  src/filemanager/          # application package
+  tools/
+    check_phase2.py …       # offline acceptance (no API key for phase 2–4)
+    check_phase5_gui.py     # GUI smoke (QT_QPA_PLATFORM=offscreen)
+    cli_chat.py             # CLI Agent (needs API key)
 ```
 
-### Run (development)
-
-From the repository root:
-
-```bash
-pip install -e .
-python -m filemanager
-```
-
-Or, after install, the console script `filemanager` if your Python `Scripts` directory is on `PATH`.
-
-**Requirements:** Python ≥ 3.10, `PySide6`, `send2trash`.
-
-### Packaging (PyInstaller)
-
-Install optional tooling and build:
-
-```bash
-pip install -e ".[pack]"
-python -m PyInstaller filemanager.spec --noconfirm
-```
-
-Output: `dist/FileManager/` containing `FileManager.exe` (Windows) plus `_internal` and Qt plugins. **Distribute the entire folder**, not only the `.exe`.
-
-The spec uses `collect_all("PySide6")` for reliability; the bundle is large. Optional SQL/Web plugin DLL warnings during build are usually harmless for this app.
+**Requirements:** Python ≥ 3.10, `PySide6`, `send2trash`. Install and run steps: see **Quick start** above.
 
 ---
 
@@ -85,53 +188,132 @@ The spec uses `collect_all("PySide6")` for reliability; the bundle is large. Opt
 
 ### 概览
 
-FileManager 是用 **PySide6** 写的桌面小工具：选定**根目录**，可选择是否**递归子目录**，枚举树上所有**文件**并在表格中展示；通过筛选与排序缩小范围，支持**多选**，**单选时可在侧栏预览**（图片/文本/十六进制摘录）；批量**复制到指定文件夹**或**删除所选**（Windows 下本地固定盘尽量进回收站，外接可移动/网络/光驱等卷为永久删除并会提示）；右侧文本区给出基于扩展名与根目录标记的**目录画像**（启发式说明，仅供参考）。
+FileManager 是基于 **PySide6** 的桌面工具，左侧为 **Agent 对话栏**，右侧为**原有文件管理界面**（根目录、扫描、筛选、表格、预览、画像、手动复制/删除）。两侧**扫描结果互不自动同步**。
 
-### 设计理念
+### 快速上手 — 从 GitHub 到运行
 
-- **界面不阻塞**：目录遍历在 `ScanThread`（`QThread`）中执行，扫完后一次性更新模型。
-- **模型与视图分离**：底层 `FileTableModel` 存放扫描结果；`FileFilterProxy` 在代理层做筛选与排序，数值列（大小、时间）在 `lessThan` 中按真实数值比较。
-- **删除与卷类型**：Windows 上根据卷类型区分：本地固定盘优先 `send2trash` 进回收站；可移动盘、网络盘、光驱等走永久删除并在确认框说明。其它系统仍统一使用 `send2trash`（以系统行为为准）。
-- **画像非判定**：只做统计与规则匹配，不充当严格“分类器”。
+**前置条件：** 已安装 Git、**Python 3.10+**（`python --version`）、可访问网络以下载依赖。
 
-### 核心模块说明
+#### 1. 获取代码
 
-与上表相同，中文简述：
+```bash
+git clone https://github.com/JTRMinsk/filemanager.git
+cd filemanager
+git checkout agentization   # Agent 功能在此分支；若默认分支已合并可省略
+```
 
-- **`main` / `window`**：程序入口与主界面布局、信号槽连接；`window` 含单文件预览（图片 / 文本 / 十六进制摘录）。
-- **`models`**：单条文件记录 `FileEntry`。
-- **`table_model`**：表格模型与筛选代理，扩展名/大小/文件名/修改时间范围在 `set_filters` + `filterAcceptsRow` 中实现。
-- **`scanner`**：后台扫描，递归用 `Path.rglob`，仅当前层用 `iterdir`。
-- **`profile`**：`summarize_directory` 汇总扩展名占比、内容倾向与常见工程文件/目录标记。
-- **`fs_ops`**：复制；按卷类型选择回收站删除或永久删除。
+#### 2. 虚拟环境（建议）
 
-### 代码目录结构
+Windows（PowerShell）：
 
-见上文英文部分的树状说明；源代码均在 `src/filemanager/` 下，符合 `src` 布局，由 `pyproject.toml` 中 `package-dir` 指向 `src`。
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
 
-### 运行方式（开发）
+macOS / Linux：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+#### 3. 安装依赖
+
+**仅右侧传统文件管理**（扫描 / 筛选 / 复制 / 删除，不用 Agent）：
+
+```bash
+pip install -e .
+```
+
+**需要 Agent 对话**（任选一种 LLM 后端）：
+
+```bash
+pip install -e ".[openai]"      # DeepSeek / OpenAI 兼容 API
+# pip install -e ".[anthropic]" # Claude
+```
+
+#### 4. 启动
+
+```bash
+python -m filemanager
+```
+
+若已将 Python 的 `Scripts` 加入 PATH，也可直接：`filemanager`
+
+#### 5. 首次使用流程
+
+| 步骤 | 位置 | 操作 |
+|------|------|------|
+| 1 | 左侧 **设置** | 新增配置（名称、后端、模型、API Key）。DeepSeek 选后端 `deepseek`，Base URL 可留空。保存并设为当前。 |
+| 2 | 右侧 **根目录** | 输入或浏览要管理的文件夹。 |
+| 3 | 右侧 **扫描** | 点「扫描」（「包含子目录」默认不勾选；最多 **500** 条）。 |
+| 4 | 右侧 | 筛选、单选预览、复制到… / 删除所选。 |
+| 5 | 左侧对话 | 用自然语言描述任务；复制/删除/写入记忆前会出现黄色 **确认** 卡片。 |
+| 6 | 左侧 **记忆** | 可选：查看/编辑长期记忆（`%APPDATA%\filemanager\memory.md`）。 |
+
+配置、记忆、操作日志均在 **`%APPDATA%\filemanager\`**，**不会**写在 exe 同目录。
+
+#### 6. 离线验收（可选，无需 API Key）
 
 在仓库根目录：
 
 ```bash
-pip install -e .
-python -m filemanager
+python tools/check_phase2.py
+python tools/check_phase3.py
+python tools/check_phase4.py
 ```
 
-若已将 Python 的 `Scripts` 加入环境变量，也可直接执行 `filemanager`。
+GUI 离屏冒烟：
 
-### 打包方式（PyInstaller）
+```powershell
+# Windows PowerShell:
+$env:QT_QPA_PLATFORM = "offscreen"; python tools/check_phase5_gui.py
+```
+
+#### 7. 打包分发（可选）
+
+若打包后的 exe 也要用 Agent，安装时需带上 LLM 可选依赖：
 
 ```bash
-pip install -e ".[pack]"
+pip install -e ".[pack,openai]"
+# 或: pip install -e ".[pack,anthropic]"
+```
+
+在仓库根目录执行：
+
+```bash
 python -m PyInstaller filemanager.spec --noconfirm
 ```
 
-生成目录：`dist/FileManager/`。请将**整个 `FileManager` 文件夹**复制到目标机器运行其中的 `FileManager.exe`；勿只拷贝单个 exe。
+产物：**`dist/FileManager/`** 整个文件夹（含 `FileManager.exe` 与 Qt 运行库），**不要只拷贝单个 exe**。
 
-打包过程中若出现与数据库/Web 等可选 Qt 插件相关的 DLL 缺失告警，一般**不影响**本工具运行。若需减小体积，可后续改为仅收集 `PySide6` 的必要子集（需自行验证无缺件）。
+**最终用户：** 拷贝整个 `FileManager` 文件夹 → 运行 `FileManager.exe` → 在设置里配置 API（与开发运行共用 `%APPDATA%` 下的配置）。
+
+---
+
+### 扫描说明
+
+| 管线 | 上限常量 | 位置 |
+|------|----------|------|
+| 右侧 GUI | `GUI_SCAN_MAX = 500` | `scanner.py` |
+| Agent 工具 | `SCAN_CAP = 500` | `tools.py` |
+
+- 右侧默认**不勾选**「包含子目录」。
+- Agent 复制/删除成功后**不会**自动触发右侧 rescan；需要时手动点「扫描」。
+- 达到 500 条上限时，状态栏会提示可能还有更多文件。
+
+### Agent 与配置
+
+- **设置**：配置 DeepSeek / OpenAI 兼容 / Anthropic 等 API。
+- **记忆**：编辑 `%APPDATA%\filemanager\memory.md` 中的长期记忆。
+- **允许操作的目录**：留空则 Agent 写操作仅限用户主目录子树。
+- 配置与记忆均在 **`%APPDATA%\filemanager\`**，不随 exe 目录迁移。
+
+破坏性操作需在对话题确认；记忆仅帮助理解偏好，**不能**跳过删除/复制确认。
 
 ### 版本与依赖
 
-- 版本见 `pyproject.toml` 中 `version`。
-- 运行时依赖：`PySide6`、`send2trash`；打包额外可选：`pyinstaller`（`[pack]`）。
+- 版本见 `pyproject.toml` / `CHANGELOG.md`。
+- 运行时：`PySide6`、`send2trash`；可选：`openai`、`anthropic`、`pyinstaller`（`[pack]`）。
+- 安装与运行步骤见上文 **快速上手 — 从 GitHub 到运行**。

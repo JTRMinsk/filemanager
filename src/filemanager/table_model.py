@@ -11,10 +11,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QSortFilterProxyModel
 
+from filemanager.core import entry_matches, parse_ext_filter
 from filemanager.models import FileEntry
 from filemanager.profile import _format_size
 
@@ -100,24 +99,6 @@ class FileTableModel(QAbstractTableModel):
         return None
 
 
-def _parse_ext_filter(text: str) -> set[str] | None:
-    """将输入框中的扩展名列表解析为小写带点的集合；空输入表示「不限制扩展名」返回 None。
-
-    支持中文逗号、忽略空白；未写前导点时自动补上 ``.``。"""
-    t = text.strip()
-    if not t:
-        return None
-    parts = [p.strip().lower() for p in t.replace("，", ",").split(",") if p.strip()]
-    if not parts:
-        return None
-    out: set[str] = set()
-    for p in parts:
-        if not p.startswith("."):
-            p = "." + p
-        out.add(p)
-    return out
-
-
 class FileFilterProxy(QSortFilterProxyModel):
     """按扩展名、大小、名称子串、修改时间范围筛选当前扫描结果。
 
@@ -143,7 +124,7 @@ class FileFilterProxy(QSortFilterProxyModel):
         min_mtime: float | None = None,
         max_mtime: float | None = None,
     ) -> None:
-        self._exts = _parse_ext_filter(ext_text)
+        self._exts = parse_ext_filter(ext_text)
         self._min_size = min_size
         self._max_size = max_size
         self._name_sub = name_sub.strip().lower()
@@ -158,29 +139,18 @@ class FileFilterProxy(QSortFilterProxyModel):
         model = self.sourceModel()
         if not isinstance(model, FileTableModel):
             return True
-        idx = model.index(source_row, 0)
-        path_s = model.data(idx, ROLE_PATH) or ""
-        suffix = (model.data(idx, ROLE_SUFFIX) or "").lower()
-        size = int(model.data(idx, ROLE_SIZE) or 0)
-        name = Path(path_s).name.lower()
-
-        if self._exts is not None:
-            key = suffix if suffix else ""
-            if key not in self._exts:
-                return False
-        if self._min_size is not None and size < self._min_size:
+        e = model.entry_at_row(source_row)
+        if e is None:
             return False
-        if self._max_size is not None and size > self._max_size:
-            return False
-        if self._name_sub and self._name_sub not in name:
-            return False
-        mtime = float(model.data(idx, ROLE_MTIME) or 0)
-        # 时间与 QDateTimeEdit 使用同一套「本地」Unix 秒级时间戳，可与 stat.st_mtime 比较
-        if self._min_mtime is not None and mtime < self._min_mtime:
-            return False
-        if self._max_mtime is not None and mtime > self._max_mtime:
-            return False
-        return True
+        return entry_matches(
+            e,
+            self._exts,
+            self._min_size,
+            self._max_size,
+            self._name_sub,
+            self._min_mtime,
+            self._max_mtime,
+        )
 
     def lessThan(self, source_left: QModelIndex, source_right: QModelIndex) -> bool:  # noqa: N802
         col = source_left.column()
