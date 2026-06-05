@@ -2,6 +2,10 @@
 
 Desktop file utility with an optional **AI Agent** side panel: scan a root folder, filter and sort files, multi-select batches, copy or delete (Recycle Bin on fixed local drives on Windows; permanent delete on removable/network/CD volumes with a warning), directory profile (heuristic), and natural-language file operations via configured LLM.
 
+![Main window — Agent chat (left) and classic file manager (right)](docs/screenshots/main-ui.png)
+
+*Fluent UI: language switch, LLM profile, scan/filter/preview on the right; natural-language tasks on the left.*
+
 ---
 
 ## English
@@ -247,6 +251,10 @@ filemanager/
 ### 概览
 
 FileManager 是基于 **PySide6** 的桌面工具，左侧为 **Agent 对话栏**，右侧为**原有文件管理界面**（根目录、扫描、筛选、表格、预览、画像、手动复制/删除）。两侧**扫描结果互不自动同步**。
+
+![主界面 — 左侧 Agent 对话，右侧经典文件管理](docs/screenshots/main-ui.png)
+
+*Fluent 风格界面：顶栏可切换中/英文与 LLM 配置；右侧扫描/筛选/预览；左侧用自然语言驱动 Agent。*
 
 ### 快速上手 — 从 GitHub 到运行
 
