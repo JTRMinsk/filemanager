@@ -10,6 +10,7 @@
 {
   "active": "我的Claude",
   "allowed_roots": [],
+  "scan_max": 10000,
   "profiles": [
      {"name": "我的Claude", "backend": "anthropic", "model": "", "key": "sk-...", "base_url": ""},
      {"name": "DeepSeek",     "backend": "deepseek", "model": "deepseek-v4-flash", "key": "sk-...", "base_url": "https://api.deepseek.com"}
@@ -24,6 +25,18 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from filemanager.config import CONFIG_FILE
+
+DEFAULT_SCAN_MAX = 10_000
+MIN_SCAN_MAX = 1
+MAX_SCAN_MAX = 500_000
+
+DEFAULT_FIND_MAX_RESULTS = 50
+MIN_FIND_MAX_RESULTS = 1
+MAX_FIND_MAX_RESULTS = 500
+
+DEFAULT_FIND_MAX_VISITED = 200_000
+MIN_FIND_MAX_VISITED = 1_000
+MAX_FIND_MAX_VISITED = 2_000_000
 
 
 @dataclass
@@ -62,6 +75,64 @@ def _load_raw() -> dict:
         return {"active": "", "allowed_roots": [], "profiles": []}
     raw.setdefault("allowed_roots", [])
     return raw
+
+
+def _clamp_scan_max(value: int) -> int:
+    return max(MIN_SCAN_MAX, min(MAX_SCAN_MAX, value))
+
+
+def get_scan_max() -> int:
+    """返回单次扫描文件数量上限（GUI 与 Agent 共用）。未配置时用 DEFAULT_SCAN_MAX。"""
+    raw = _load_raw()
+    try:
+        return _clamp_scan_max(int(raw.get("scan_max", DEFAULT_SCAN_MAX)))
+    except (TypeError, ValueError):
+        return DEFAULT_SCAN_MAX
+
+
+def set_scan_max(value: int) -> None:
+    """保存扫描数量上限到 config.json。"""
+    raw = _load_raw()
+    raw["scan_max"] = _clamp_scan_max(value)
+    _save_raw(raw)
+
+
+def _clamp_find_max_results(value: int) -> int:
+    return max(MIN_FIND_MAX_RESULTS, min(MAX_FIND_MAX_RESULTS, value))
+
+
+def _clamp_find_max_visited(value: int) -> int:
+    return max(MIN_FIND_MAX_VISITED, min(MAX_FIND_MAX_VISITED, value))
+
+
+def get_find_max_results() -> int:
+    """Agent find_files 最多返回的匹配条数。"""
+    raw = _load_raw()
+    try:
+        return _clamp_find_max_results(int(raw.get("find_max_results", DEFAULT_FIND_MAX_RESULTS)))
+    except (TypeError, ValueError):
+        return DEFAULT_FIND_MAX_RESULTS
+
+
+def set_find_max_results(value: int) -> None:
+    raw = _load_raw()
+    raw["find_max_results"] = _clamp_find_max_results(value)
+    _save_raw(raw)
+
+
+def get_find_max_visited() -> int:
+    """Agent find_files 遍历中最多 stat 的文件数。"""
+    raw = _load_raw()
+    try:
+        return _clamp_find_max_visited(int(raw.get("find_max_visited", DEFAULT_FIND_MAX_VISITED)))
+    except (TypeError, ValueError):
+        return DEFAULT_FIND_MAX_VISITED
+
+
+def set_find_max_visited(value: int) -> None:
+    raw = _load_raw()
+    raw["find_max_visited"] = _clamp_find_max_visited(value)
+    _save_raw(raw)
 
 
 def _save_raw(data: dict) -> None:

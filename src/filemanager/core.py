@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -76,6 +77,101 @@ def scan_directory(
     if progress_cb is not None:
         progress_cb(len(entries))
     return entries
+
+
+# ===========================================================================
+# 按条件搜索（遍历时匹配，供 Agent find_files 工具）
+# ===========================================================================
+@dataclass
+class FindMeta:
+    """``find_files`` 的遍历统计。"""
+
+    matched_count: int
+    visited_count: int
+    truncated: bool
+    stopped_reason: str = ""  # "" | "max_results" | "max_visited"
+
+
+def find_files(
+    root: Path,
+    recursive: bool = True,
+    *,
+    exts: set[str] | None = None,
+    min_size: int | None = None,
+    max_size: int | None = None,
+    name_sub: str = "",
+    min_mtime: float | None = None,
+    max_mtime: float | None = None,
+    max_results: int = 50,
+    max_visited: int = 200_000,
+) -> tuple[list[FileEntry], FindMeta]:
+    """在目录树中按条件查找文件，仅收集匹配项（非 scan 式先收 N 个任意文件）。
+
+    ``max_results``: 最多返回多少条匹配。
+    ``max_visited``: 最多对多少个候选文件执行 stat（有 exts 时先做后缀快筛再 stat）。
+    """
+    root = root.resolve()
+    if not root.is_dir():
+        raise OSError(f"不是有效目录: {root}")
+
+    matches: list[FileEntry] = []
+    visited = 0
+    stopped_reason = ""
+
+    def consider(path: Path) -> bool:
+        nonlocal visited, stopped_reason
+        if stopped_reason:
+            return False
+        if exts is not None:
+            key = path.suffix.lower() if path.suffix else ""
+            if key not in exts:
+                return True
+        if visited >= max_visited:
+            stopped_reason = "max_visited"
+            return False
+        visited += 1
+        try:
+            st = path.stat()
+        except OSError:
+            return True
+        entry = FileEntry(path=path, size=st.st_size, mtime=st.st_mtime)
+        if entry_matches(
+            entry, exts, min_size, max_size, name_sub, min_mtime, max_mtime
+        ):
+            matches.append(entry)
+            if len(matches) >= max_results:
+                stopped_reason = "max_results"
+                return False
+        return True
+
+    if recursive:
+
+        def _on_walk_error(_err: OSError) -> None:
+            pass
+
+        for dirpath, _dirnames, filenames in os.walk(root, onerror=_on_walk_error):
+            for name in filenames:
+                if not consider(Path(dirpath) / name):
+                    break
+            if stopped_reason:
+                break
+    else:
+        try:
+            for p in root.iterdir():
+                if p.is_file() and not consider(p):
+                    break
+        except OSError as e:
+            raise OSError(f"无法读取目录: {root}") from e
+
+    if min_size is not None or max_size is not None:
+        matches.sort(key=lambda e: e.size, reverse=True)
+
+    return matches, FindMeta(
+        matched_count=len(matches),
+        visited_count=visited,
+        truncated=bool(stopped_reason),
+        stopped_reason=stopped_reason,
+    )
 
 
 # ===========================================================================

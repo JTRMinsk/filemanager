@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from filemanager.agent import Agent
 from filemanager.llm.mock_client import MockLLMClient, call, say
+from filemanager.tools import ToolContext, execute, prepare, summarize_entries
 
 
 def _fail(msg: str) -> None:
@@ -52,6 +53,10 @@ def test_scan_filter_profile() -> None:
             _fail(f"最终回复异常: {reply!r}")
         if len(llm.calls) != 4:
             _fail(f"期望 4 次 chat 调用，实际 {len(llm.calls)}")
+        tool_msgs = [m.content for m in agent.session.messages if m.role == "tool"]
+        txt_path = str(root / "a.txt")
+        if not any(txt_path in (c or "") for c in tool_msgs):
+            _fail(f"工具结果应含完整路径 {txt_path!r}，实际: {tool_msgs!r}")
         _ok("scan → filter → profile 链路")
 
 
@@ -106,11 +111,57 @@ def test_context_compact() -> None:
         _ok("上下文压缩")
 
 
+def test_summarize_entries_paths() -> None:
+    """summarize_entries 输出绝对路径与完整路径列表。"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        f = root / "sample.txt"
+        f.write_text("x")
+        from filemanager.models import FileEntry
+
+        entry = FileEntry(path=f, size=1, mtime=f.stat().st_mtime)
+        text = summarize_entries([entry], scan_root=root)
+        resolved = str(f.resolve())
+        if resolved not in text:
+            _fail(f"摘要应含绝对路径 {resolved!r}: {text!r}")
+        if "完整路径:" not in text:
+            _fail("小结果集应含「完整路径:」段落")
+        _ok("summarize_entries 含路径")
+
+
+def test_resolve_path_and_list_volumes() -> None:
+    """resolve_path 与 list_volumes 只读工具。"""
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "exists.txt"
+        f.write_text("ok")
+        from filemanager.agent import SessionState
+
+        ctx = ToolContext(session=SessionState())
+
+        prep = prepare("resolve_path", {"path": str(f)}, ctx)
+        result = execute("resolve_path", {"path": str(f)}, ctx, prep)
+        if "存在:" not in result.summary or str(f.resolve()) not in result.summary:
+            _fail(f"resolve_path 应返回存在与绝对路径: {result.summary!r}")
+
+        prep_missing = prepare("resolve_path", {"path": str(Path(td) / "missing.txt")}, ctx)
+        missing = execute("resolve_path", {"path": str(Path(td) / "missing.txt")}, ctx, prep_missing)
+        if not missing.summary.startswith("不存在:"):
+            _fail(f"resolve_path 应对不存在文件返回「不存在:」: {missing.summary!r}")
+
+        prep_vol = prepare("list_volumes", {}, ctx)
+        volumes = execute("list_volumes", {}, ctx, prep_vol)
+        if "可用卷:" not in volumes.summary:
+            _fail(f"list_volumes 应返回可用卷: {volumes.summary!r}")
+        _ok("resolve_path + list_volumes")
+
+
 def main() -> None:
     print("Phase 2 check (MockLLMClient, no API key)\n")
     test_scan_filter_profile()
     test_preview_and_new_session()
     test_context_compact()
+    test_summarize_entries_paths()
+    test_resolve_path_and_list_volumes()
     print("\nAll checks passed.")
 
 

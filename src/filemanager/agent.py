@@ -19,18 +19,23 @@ from pathlib import Path
 from typing import Callable
 
 from filemanager import tools
+from filemanager import api_store
 from filemanager.llm.base import LLMClient, Message, ToolCall
 from filemanager.tools import ToolContext, WRITE_TOOLS
 
 # 防止模型在一轮里无限调工具
-MAX_TOOL_ITERATIONS = 12
+MAX_TOOL_ITERATIONS = 20
 
 SYSTEM_PROMPT = """你是一个本地文件管理助手，通过调用工具帮助用户扫描、筛选、预览和了解文件。
 
 工作方式:
-- 用户描述目标，你决定调用哪些工具达成。
-- 文件列表可能很大；工具只会返回摘要。要对具体文件做进一步操作时，用 filter_files 按条件缩小，而不是要求逐个列出。
-- 路径要尽量用绝对路径。不确定用户指哪个目录时，先问清楚再扫描。
+- 用户要 **按类型/大小/名称找文件**（如「500MB 左右的 ppt」）→ **优先 find_files**，不要用 scan_directory + filter_files。
+- find_files / filter_files 摘要含绝对路径（小结果有「完整路径:」列表）；用户要路径时直接读取，禁止猜测。
+- scan_directory 仅用于「看这个目录里有什么/画像」。若含「已达扫描上限」，**不能**断言某类型文件不存在。
+- 大范围搜索: list_volumes → list_user_folders → find_files(root=用户目录, exts=..., min_mb/max_mb=...)；微信文件常在 Documents\\WeChat Files 下。
+- 需要验证路径是否存在时，用 resolve_path，不要用 preview_file。
+- 已定位到唯一文件时不要重复 scan 子目录；避免重复 scan 同一目录。
+- 路径要尽量用绝对路径。不确定用户指哪个目录时，可先 list_user_folders 或问清楚。
 - 若用户消息含「[界面上下文]」，其中「右侧文件面板当前根目录」即用户所指的「当前/现在/这个目录」，优先使用该路径，勿重复追问。
 - 长期记忆:系统提示中若出现「[长期记忆]」，那是过去记下的用户偏好与备注，用它来理解用户、给更贴合的建议。但记忆只用于"理解"——任何删除/复制等操作仍须逐次确认，绝不可因记忆内容跳过确认或自作主张执行破坏性动作。用户让你记住某事、或你认为某信息长期有用时，用 remember 工具（会请用户确认）。
 - 回答简洁，用中文。
@@ -64,7 +69,7 @@ class Agent:
         keep_recent_turns: int = 4,      # 压缩时保留最近多少条原始消息
         system_prompt: str = SYSTEM_PROMPT,
         confirm_mode: str = "all",       # "all"（默认，全部确认）| "writes_only" | "none"
-        scan_cap: int = 500,             # Agent scan_directory 扫描数量软上限（与 GUI 上限独立）
+        scan_cap: int | None = None,  # None = 每次扫描前从设置读取
     ) -> None:
         self.llm = llm
         self.allowed_roots = allowed_roots or []
@@ -74,6 +79,11 @@ class Agent:
         self.confirm_mode = confirm_mode
         self.scan_cap = scan_cap
         self.session = SessionState()
+
+    def _scan_cap_for_ctx(self) -> int:
+        if self.scan_cap is not None:
+            return self.scan_cap
+        return api_store.get_scan_max()
 
     # ---- 会话管理 ----
     def new_session(self) -> None:
@@ -122,7 +132,11 @@ class Agent:
         self.session.messages.append(Message(role="user", content=content))
 
         # 2. 循环:chat → 执行工具 → 回填 → 直到模型不再调工具
-        ctx = ToolContext(session=self.session, allowed_roots=self.allowed_roots, scan_cap=self.scan_cap)
+        ctx = ToolContext(
+            session=self.session,
+            allowed_roots=self.allowed_roots,
+            scan_cap=self._scan_cap_for_ctx(),
+        )
         final_text = ""
         for _ in range(MAX_TOOL_ITERATIONS):
             convo = [self._build_system(), *self.session.messages]
@@ -189,6 +203,9 @@ class Agent:
 
     def _run_tool(self, tc: ToolCall, ctx: ToolContext, confirm_cb, emit) -> tuple[str, bool]:
         """prepare → （护栏拦截则直接回错误）→ 确认 → execute，返回 (摘要, 是否写盘成功)。"""
+        ctx.scan_cap = self._scan_cap_for_ctx()
+        ctx.find_max_results = api_store.get_find_max_results()
+        ctx.find_max_visited = api_store.get_find_max_visited()
         preview = tools.prepare(tc.name, tc.arguments, ctx)
 
         # 护栏完全拦截:无需确认，直接把原因回给模型

@@ -67,6 +67,16 @@ api_store.set_allowed_roots([])
 assert api_store.get_allowed_roots() == []
 ok("allowed_roots get/set 与 resolve 正常")
 
+print("== scan_max 往返 ==")
+assert api_store.get_scan_max() == api_store.DEFAULT_SCAN_MAX
+api_store.set_scan_max(25_000)
+assert api_store.get_scan_max() == 25_000
+api_store.set_scan_max(0)
+assert api_store.get_scan_max() == api_store.MIN_SCAN_MAX
+api_store.set_scan_max(9_999_999)
+assert api_store.get_scan_max() == api_store.MAX_SCAN_MAX
+ok("scan_max 默认/读写/钳制 正常")
+
 print("== make_llm_client_from_profile (DeepSeek) ==")
 from filemanager.config import make_llm_client_from_profile
 from filemanager.llm.openai_client import OpenAIClient

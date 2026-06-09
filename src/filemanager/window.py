@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QStackedWidget,
     QStatusBar,
@@ -54,7 +55,7 @@ from filemanager.fs_ops import (
     trash_paths,
 )
 from filemanager.profile import summarize_directory
-from filemanager.scanner import ScanThread, GUI_SCAN_MAX
+from filemanager.scanner import ScanThread
 from filemanager.table_model import ROLE_PATH, FileFilterProxy, FileTableModel
 
 _PREVIEW_IMAGE_MAX_EDGE = 480
@@ -105,10 +106,19 @@ class MainWindow(QMainWindow):
         # self._recursive.setChecked(True)
         self._recursive.setChecked(False)
         self._recursive.toggled.connect(lambda _on: self._sync_chat_ui_context())
+        self._scan_max = QSpinBox()
+        self._scan_max.setRange(api_store.MIN_SCAN_MAX, api_store.MAX_SCAN_MAX)
+        self._scan_max.setSingleStep(1000)
+        self._scan_max.setGroupSeparatorShown(True)
+        self._scan_max.setToolTip("单次扫描最多收集的文件数（与 Agent 共用，修改后自动保存）")
+        self._scan_max.setValue(api_store.get_scan_max())
+        self._scan_max.valueChanged.connect(self._on_scan_max_changed)
         dir_row.addWidget(QLabel("根目录:"), 0)
         dir_row.addWidget(self._path_edit, 1)
         dir_row.addWidget(btn_browse, 0)
         dir_row.addWidget(self._recursive, 0)
+        dir_row.addWidget(QLabel("上限:"), 0)
+        dir_row.addWidget(self._scan_max, 0)
         dir_row.addWidget(self._btn_scan, 0)
         root_layout.addLayout(dir_row)
         self._sync_chat_ui_context()
@@ -279,6 +289,9 @@ class MainWindow(QMainWindow):
             f"当前列表显示 {self._proxy.rowCount()} / {self._model.rowCount()} 行。"
         )
 
+    def _on_scan_max_changed(self, value: int) -> None:
+        api_store.set_scan_max(value)
+
     def _start_scan(self) -> None:
         """防重入：若上一线程未结束则直接提示；否则禁用按钮、启动 ScanThread。"""
         if self._scan_thread and self._scan_thread.isRunning():
@@ -294,7 +307,10 @@ class MainWindow(QMainWindow):
         self._btn_scan.setEnabled(False)
         self._status.showMessage("正在扫描…")
 
-        th = ScanThread(self._root, self._recursive.isChecked())
+        scan_max = self._scan_max.value()
+        api_store.set_scan_max(scan_max)
+        self._last_scan_max = scan_max
+        th = ScanThread(self._root, self._recursive.isChecked(), max_files=scan_max)
         self._scan_thread = th
         th.progress.connect(lambda n: self._status.showMessage(f"已扫描 {n} 个文件…"))
         th.finished_ok.connect(self._on_scan_finished)
@@ -315,9 +331,9 @@ class MainWindow(QMainWindow):
         self._apply_filters()
         text = summarize_directory(self._root, entries)
         self._profile_view.setPlainText(text)
-        if len(entries) >= GUI_SCAN_MAX:
+        if len(entries) >= self._last_scan_max:
             self._status.showMessage(
-                f"扫描完成：{len(entries)} 个文件（已达 GUI 上限 {GUI_SCAN_MAX}，可能还有更多）。"
+                f"扫描完成：{len(entries)} 个文件（已达上限 {self._last_scan_max:,}，可能还有更多）。"
             )
         else:
             self._status.showMessage(f"扫描完成：{len(entries)} 个文件。")

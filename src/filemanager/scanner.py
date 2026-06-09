@@ -16,19 +16,17 @@ from PySide6.QtCore import QThread, Signal
 
 from filemanager.core import scan_directory
 
-# 右侧 GUI ScanThread 扫描数量上限（与 Agent tools.SCAN_CAP 独立配置）
-GUI_SCAN_MAX = 500
-
 
 class ScanThread(QThread):
     progress = Signal(int)
     finished_ok = Signal(list)
     failed = Signal(str)
 
-    def __init__(self, root: Path, recursive: bool) -> None:
+    def __init__(self, root: Path, recursive: bool, *, max_files: int) -> None:
         super().__init__()
         self._root = root
         self._recursive = recursive
+        self._max_files = max_files
 
     def run(self) -> None:
         try:
@@ -36,7 +34,7 @@ class ScanThread(QThread):
                 self._root,
                 self._recursive,
                 progress_cb=self.progress.emit,
-                max_files=GUI_SCAN_MAX,
+                max_files=self._max_files,
             )
         except Exception as e:  # noqa: BLE001
             self.failed.emit(str(e))

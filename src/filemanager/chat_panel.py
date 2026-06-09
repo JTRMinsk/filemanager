@@ -249,8 +249,12 @@ class ChatPanel(QWidget):
             args = ", ".join(f"{k}={v}" for k, v in event.get("args", {}).items())
             self._append_tool(f"→ 调用 {event['name']}({args})")
         elif t == "tool_result":
-            first = (event.get("summary") or "").splitlines()[0] if event.get("summary") else ""
-            self._append_tool(f"  ↳ {first}")
+            summary = event.get("summary") or ""
+            lines = summary.splitlines()
+            preview = "\n".join(lines[:5])
+            if len(lines) > 5:
+                preview += "\n  …"
+            self._append_tool(f"  ↳ {preview}")
         # assistant_text / final 在 finished 时统一呈现，避免重复
 
     def _on_finished(self, reply: str, filesystem_changed: bool) -> None:

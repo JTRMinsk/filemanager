@@ -8,19 +8,21 @@
 安全要点:
 - **所有工具**默认都要确认（用户选择，最保守）；策略在 Agent 侧，可改。
 - **绝不把完整文件列表塞回 LLM**（§4.2）:摘要进上下文，完整结果留 SessionState。
-- **扫描封顶** ``SCAN_CAP``，超大目录不闷头扫。
+- **扫描封顶** 由设置中的 ``scan_max`` 控制（默认 10000），每次扫描前读取。
 - **写操作护栏**:目标路径过 ``guard.check_write_allowed``，系统目录硬禁。
 """
 
 from __future__ import annotations
 
+import string
+import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from filemanager import core, guard, oplog
+from filemanager import api_store, core, guard, oplog
 from filemanager.fs_ops import (
     copy_paths,
     delete_paths_permanent,
@@ -33,7 +35,6 @@ if TYPE_CHECKING:
     from filemanager.agent import SessionState
 
 SAMPLE_SIZE = 30          # 摘要/清单里最多列举多少个文件名
-SCAN_CAP = 500            # Agent scan_directory 扫描数量软上限
 WRITE_TOOLS = {"copy_files", "delete_files"}
 
 
@@ -58,13 +59,19 @@ class ToolPreview:
 class ToolContext:
     session: "SessionState"
     allowed_roots: list[Path] = field(default_factory=list)
-    scan_cap: int = SCAN_CAP
+    scan_cap: int = field(default_factory=api_store.get_scan_max)
+    find_max_results: int = field(default_factory=api_store.get_find_max_results)
+    find_max_visited: int = field(default_factory=api_store.get_find_max_visited)
 
 
 # ===========================================================================
 # 摘要 / 清单
 # ===========================================================================
-def summarize_entries(entries: list, sample: int = SAMPLE_SIZE) -> str:
+def summarize_entries(
+    entries: list,
+    sample: int = SAMPLE_SIZE,
+    scan_root: Path | None = None,
+) -> str:
     n = len(entries)
     if n == 0:
         return "0 个文件。"
@@ -74,10 +81,54 @@ def summarize_entries(entries: list, sample: int = SAMPLE_SIZE) -> str:
     lines.append("扩展名分布:" + "，".join(f"{ext} {c}" for ext, c in exts))
     lines.append(f"前 {min(sample, n)} 个文件:")
     for e in entries[:sample]:
-        lines.append(f"  {e.name}  {_format_size(e.size)}  {e.modified_dt():%Y-%m-%d %H:%M}")
+        path_str = str(e.path.resolve())
+        if scan_root is not None:
+            path_str = e.relative_display(scan_root)
+        lines.append(f"  {path_str}  {_format_size(e.size)}  {e.modified_dt():%Y-%m-%d %H:%M}")
     if n > sample:
         lines.append(f"  …… 另有 {n - sample} 个未列出（如需精确操作，请用 filter_files 缩小）。")
+    if n <= sample:
+        lines.append("完整路径:")
+        for e in entries:
+            lines.append(f"  {e.path.resolve()}")
     return "\n".join(lines)
+
+
+def _list_volumes() -> list[str]:
+    """列出本机可用卷/挂载点。"""
+    if sys.platform == "win32":
+        return [f"{d}:\\" for d in string.ascii_uppercase if Path(f"{d}:\\").exists()]
+    volumes: list[str] = ["/"]
+    for candidate in (Path("/Volumes"), Path("/media"), Path("/mnt")):
+        if not candidate.is_dir():
+            continue
+        try:
+            for p in candidate.iterdir():
+                if p.is_dir():
+                    volumes.append(str(p))
+        except OSError:
+            continue
+    return volumes
+
+
+def _list_user_folders() -> list[tuple[str, Path]]:
+    """当前用户常用目录（存在才返回）。"""
+    home = Path.home()
+    candidates = [
+        ("Desktop/桌面", home / "Desktop"),
+        ("Documents/文档", home / "Documents"),
+        ("Downloads/下载", home / "Downloads"),
+        ("Pictures/图片", home / "Pictures"),
+        ("WeChat Files/微信文件", home / "Documents" / "WeChat Files"),
+    ]
+    out: list[tuple[str, Path]] = []
+    for label, p in candidates:
+        try:
+            if p.is_dir():
+                out.append((label, p.resolve()))
+        except OSError:
+            continue
+    return out
 
 
 def _path_list_preview(paths: list[Path], sample: int = SAMPLE_SIZE) -> str:
@@ -99,6 +150,30 @@ def _iso_to_ts(s: str | None) -> float | None:
         return datetime.fromisoformat(s).timestamp()
     except ValueError:
         return None
+
+
+def _parse_exts_from_args(args: dict) -> set[str] | None:
+    if not args.get("exts"):
+        return None
+    exts: set[str] = set()
+    for x in args["exts"]:
+        x = str(x).strip().lower()
+        if x and not x.startswith("."):
+            x = "." + x
+        if x:
+            exts.add(x)
+    return exts or None
+
+
+def _parse_filter_kwargs(args: dict) -> dict:
+    return {
+        "exts": _parse_exts_from_args(args),
+        "min_size": int(args["min_mb"] * 1024 * 1024) if args.get("min_mb") is not None else None,
+        "max_size": int(args["max_mb"] * 1024 * 1024) if args.get("max_mb") is not None else None,
+        "name_sub": args.get("name_contains", "") or "",
+        "min_mtime": _iso_to_ts(args.get("modified_after")),
+        "max_mtime": _iso_to_ts(args.get("modified_before")),
+    }
 
 
 def _working_set(ctx: ToolContext) -> list | None:
@@ -220,15 +295,52 @@ def _prepare_recall(args, ctx) -> ToolPreview:
     return ToolPreview(description=f"检索长期记忆:{q or '（全部）'}")
 
 
+def _prepare_resolve_path(args, ctx) -> ToolPreview:
+    return ToolPreview(description=f"验证路径是否存在:{Path(args['path']).expanduser()}。")
+
+
+def _prepare_list_volumes(args, ctx) -> ToolPreview:
+    return ToolPreview(description="列出本机可用磁盘卷/挂载点。")
+
+
+def _prepare_find(args, ctx) -> ToolPreview:
+    root = Path(args["root"]).expanduser()
+    recursive = bool(args.get("recursive", True))
+    fk = _parse_filter_kwargs(args)
+    conds = []
+    if fk["exts"]:
+        conds.append(f"扩展名∈{sorted(fk['exts'])}")
+    if args.get("min_mb") is not None:
+        conds.append(f"≥{args['min_mb']}MB")
+    if args.get("max_mb") is not None:
+        conds.append(f"≤{args['max_mb']}MB")
+    if fk["name_sub"]:
+        conds.append(f"名称含「{fk['name_sub']}」")
+    cond_s = "、".join(conds) if conds else "（至少建议指定 exts 或大小）"
+    return ToolPreview(
+        description=(
+            f"在 {root} 按条件搜索（递归={recursive}，最多 {ctx.find_max_results} 条匹配）:{cond_s}。"
+        )
+    )
+
+
+def _prepare_list_user_folders(args, ctx) -> ToolPreview:
+    return ToolPreview(description="列出当前用户常用目录（Desktop/Documents/WeChat Files 等）。")
+
+
 _PREPARE = {
     "scan_directory": _prepare_scan,
     "filter_files": _prepare_filter,
+    "find_files": _prepare_find,
     "preview_file": _prepare_preview,
     "profile_directory": _prepare_profile,
     "copy_files": _prepare_copy,
     "delete_files": _prepare_delete,
     "remember": _prepare_remember,
     "recall": _prepare_recall,
+    "resolve_path": _prepare_resolve_path,
+    "list_volumes": _prepare_list_volumes,
+    "list_user_folders": _prepare_list_user_folders,
 }
 
 
@@ -259,10 +371,17 @@ def _exec_scan(args, ctx, prep) -> ToolResult:
     ctx.session.last_filter = None
     capped = ""
     if len(entries) >= ctx.scan_cap:
-        capped = (f"\n⚠️ 已达扫描上限 {ctx.scan_cap} 个，可能还有更多文件未列入。"
-                  f"建议选更具体的子目录，或关闭递归。")
+        capped = (
+            f"\n⚠️ 已达扫描上限 {ctx.scan_cap} 个，本次仅为部分采样，"
+            f"**不能**据此判断某类型文件是否存在。"
+            f"要找特定类型/大小的文件请用 find_files；或选更具体的子目录。"
+        )
     return ToolResult(
-        summary=f"已扫描 {root}（递归={recursive}）。\n" + summarize_entries(entries) + capped,
+        summary=(
+            f"已扫描 {root}（递归={recursive}）。\n"
+            + summarize_entries(entries, scan_root=root.resolve())
+            + capped
+        ),
         full_data=entries,
     )
 
@@ -271,26 +390,59 @@ def _exec_filter(args, ctx, prep) -> ToolResult:
     base = _working_set(ctx)
     if base is None:
         return ToolResult(summary="还没有扫描结果可筛选。请先调用 scan_directory。")
-    exts = None
-    if args.get("exts"):
-        exts = set()
-        for x in args["exts"]:
-            x = str(x).strip().lower()
-            if x and not x.startswith("."):
-                x = "." + x
-            if x:
-                exts.add(x)
-    min_size = int(args["min_mb"] * 1024 * 1024) if args.get("min_mb") is not None else None
-    max_size = int(args["max_mb"] * 1024 * 1024) if args.get("max_mb") is not None else None
-    result = core.filter_entries(
-        base, exts=exts, min_size=min_size, max_size=max_size,
-        name_sub=args.get("name_contains", "") or "",
-        min_mtime=_iso_to_ts(args.get("modified_after")),
-        max_mtime=_iso_to_ts(args.get("modified_before")),
-    )
+    fk = _parse_filter_kwargs(args)
+    result = core.filter_entries(base, **fk)
     ctx.session.last_filter = result
-    return ToolResult(summary=f"筛选后 {len(result)} / {len(base)} 个文件。\n" + summarize_entries(result),
-                      full_data=result)
+    scan_root = ctx.session.last_scan_root
+    return ToolResult(
+        summary=(
+            f"筛选后 {len(result)} / {len(base)} 个文件。\n"
+            + summarize_entries(result, scan_root=scan_root)
+        ),
+        full_data=result,
+    )
+
+
+def _exec_find(args, ctx, prep) -> ToolResult:
+    root = Path(args["root"]).expanduser()
+    recursive = bool(args.get("recursive", True))
+    if not root.is_dir():
+        return ToolResult(summary=f"错误:不是有效目录 — {root}")
+    fk = _parse_filter_kwargs(args)
+    try:
+        matches, meta = core.find_files(
+            root,
+            recursive,
+            max_results=ctx.find_max_results,
+            max_visited=ctx.find_max_visited,
+            **fk,
+        )
+    except OSError as e:
+        return ToolResult(summary=f"搜索失败:{e}")
+    ctx.session.last_scan = None
+    ctx.session.last_scan_root = root.resolve()
+    ctx.session.last_filter = matches
+    body = summarize_entries(matches, scan_root=root.resolve())
+    extra = f"\n（已检查 {meta.visited_count} 个候选文件）"
+    if meta.truncated:
+        if meta.stopped_reason == "max_results":
+            extra += (
+                f"\n⚠️ 已达匹配上限 {ctx.find_max_results} 条，可能还有更多符合项；"
+                f"请缩小 root 或加条件。"
+            )
+        elif meta.stopped_reason == "max_visited":
+            extra += (
+                f"\n⚠️ 已达遍历上限 {ctx.find_max_visited} 个 stat，搜索未穷尽；"
+                f"请缩小 root。"
+            )
+    return ToolResult(
+        summary=(
+            f"在 {root} 找到 {len(matches)} 个匹配（递归={recursive}）。\n"
+            + body
+            + extra
+        ),
+        full_data=matches,
+    )
 
 
 def _exec_preview(args, ctx, prep) -> ToolResult:
@@ -381,15 +533,51 @@ def _exec_recall(args, ctx, prep) -> ToolResult:
     return ToolResult(summary=f"相关记忆:\n{body}")
 
 
+def _exec_resolve_path(args, ctx, prep) -> ToolResult:
+    raw = Path(args["path"]).expanduser()
+    try:
+        path = raw.resolve()
+    except OSError:
+        path = raw
+    if not path.is_file():
+        return ToolResult(summary=f"不存在: {raw}")
+    try:
+        size = path.stat().st_size
+    except OSError as e:
+        return ToolResult(summary=f"存在但无法读取大小: {path} ({e})")
+    return ToolResult(summary=f"存在: {path} ({_format_size(size)})")
+
+
+def _exec_list_volumes(args, ctx, prep) -> ToolResult:
+    volumes = _list_volumes()
+    if not volumes:
+        return ToolResult(summary="未检测到可用卷。")
+    return ToolResult(summary="可用卷: " + "，".join(volumes))
+
+
+def _exec_list_user_folders(args, ctx, prep) -> ToolResult:
+    folders = _list_user_folders()
+    if not folders:
+        return ToolResult(summary="未找到常用用户目录。")
+    lines = ["常用目录（微信文件常在 Documents\\WeChat Files 下）:"]
+    for label, p in folders:
+        lines.append(f"  {label}: {p}")
+    return ToolResult(summary="\n".join(lines))
+
+
 _EXECUTE = {
     "scan_directory": _exec_scan,
     "filter_files": _exec_filter,
+    "find_files": _exec_find,
     "preview_file": _exec_preview,
     "profile_directory": _exec_profile,
     "copy_files": _exec_copy,
     "delete_files": _exec_delete,
     "remember": _exec_remember,
     "recall": _exec_recall,
+    "resolve_path": _exec_resolve_path,
+    "list_volumes": _exec_list_volumes,
+    "list_user_folders": _exec_list_user_folders,
 }
 
 
@@ -412,7 +600,10 @@ def _build_specs() -> list:
     return [
         ToolSpec(
             name="scan_directory",
-            description=f"扫描一个目录列出文件（最多 {SCAN_CAP} 个）。结果缓存供 filter_files/profile_directory/写操作使用。",
+            description=(
+                f"扫描一个目录列出文件（最多 {api_store.DEFAULT_SCAN_MAX} 个，可在设置中调整）。"
+                "结果缓存供 filter_files/profile_directory/写操作使用。"
+            ),
             parameters={"type": "object", "properties": {
                 "root": {"type": "string", "description": "目录绝对路径。"},
                 "recursive": {"type": "boolean", "description": "是否递归子目录，默认 true。"},
@@ -420,7 +611,7 @@ def _build_specs() -> list:
         ),
         ToolSpec(
             name="filter_files",
-            description="在最近一次扫描/筛选结果上按条件过滤。",
+            description="在最近一次 scan_directory 结果上按条件过滤（不能替代 find_files 做全盘搜索）。",
             parameters={"type": "object", "properties": {
                 "exts": {"type": "array", "items": {"type": "string"}, "description": "扩展名列表，如 ['pdf','.docx']。"},
                 "min_mb": {"type": "number"}, "max_mb": {"type": "number"},
@@ -428,6 +619,23 @@ def _build_specs() -> list:
                 "modified_after": {"type": "string", "description": "ISO 日期，如 2024-01-01。"},
                 "modified_before": {"type": "string"},
             }},
+        ),
+        ToolSpec(
+            name="find_files",
+            description=(
+                "按扩展名/大小/名称在目录树中搜索文件（遍历时匹配，不受 scan 上限截断影响）。"
+                "用户要找某类文件（如 500MB 的 ppt）时优先用此工具，不要用 scan_directory+filter_files。"
+            ),
+            parameters={"type": "object", "properties": {
+                "root": {"type": "string", "description": "搜索根目录绝对路径。"},
+                "recursive": {"type": "boolean", "description": "是否递归子目录，默认 true。"},
+                "exts": {"type": "array", "items": {"type": "string"}, "description": "扩展名，如 ['ppt','pptx']。"},
+                "min_mb": {"type": "number"},
+                "max_mb": {"type": "number"},
+                "name_contains": {"type": "string"},
+                "modified_after": {"type": "string"},
+                "modified_before": {"type": "string"},
+            }, "required": ["root"]},
         ),
         ToolSpec(
             name="preview_file",
@@ -472,6 +680,26 @@ def _build_specs() -> list:
             parameters={"type": "object", "properties": {
                 "query": {"type": "string", "description": "检索关键词;留空返回全部记忆。"},
             }},
+        ),
+        ToolSpec(
+            name="resolve_path",
+            description="验证单个路径是否存在且为文件，返回绝对路径与大小。用于确认路径，不要为验证路径而 preview_file。",
+            parameters={"type": "object", "properties": {
+                "path": {"type": "string", "description": "待验证的文件绝对或相对路径。"},
+            }, "required": ["path"]},
+        ),
+        ToolSpec(
+            name="list_volumes",
+            description="列出本机可用磁盘卷（如 Windows 盘符 C:\\、D:\\）。全盘搜索前先调用，避免扫描不存在的盘。",
+            parameters={"type": "object", "properties": {}},
+        ),
+        ToolSpec(
+            name="list_user_folders",
+            description=(
+                "列出当前用户常用目录绝对路径（Desktop/Documents/Downloads/WeChat Files 等）。"
+                "大范围找文件前可先调用以确定 find_files 的 root。"
+            ),
+            parameters={"type": "object", "properties": {}},
         ),
     ]
 
