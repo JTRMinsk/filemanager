@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.5.0] — 2026-06-09
+
+### Added
+
+- **`find_files` 工具**：遍历时按扩展名/大小/名称匹配（`core.find_files`），不受 `scan_directory` 先收 N 个任意文件的上限影响；适合「找 500MB 左右的 ppt」等搜索场景。
+- **只读辅助工具**：`resolve_path`（验证路径是否存在）、`list_volumes`（列出可用盘符）、`list_user_folders`（Desktop/Documents/WeChat Files 等常用目录）。
+- **配置项**（`api_store.py`）：`find_max_results` / `find_max_visited`（搜索专用，与 `scan_max` 分离）。
+- **验收脚本** `tools/check_find_files.py`：验证 scan 被 cap 截断时 `find_files` 仍能命中深层文件。
+
+### Changed
+
+- **工具摘要含完整路径**：`summarize_entries` 输出绝对路径；小结果集追加「完整路径:」列表；Agent 不再凭目录名+文件名猜测路径。
+- **GUI 与 Agent 共用 `scan_max`**（默认 10000，设置中可调 1～500000）；顶栏新增「上限」SpinBox；移除独立的 `GUI_SCAN_MAX` / Agent `SCAN_CAP=500`。
+- **Agent 系统提示**：按类型/大小找文件优先 `find_files`；`scan_directory` 达上限时不得断言某类型不存在。
+- **对话面板**：工具结果展示由 1 行改为最多 5 行，便于核对路径。
+- **`MAX_TOOL_ITERATIONS`**：12 → 20。
+
+### Fixed
+
+- 大目录 `scan_directory` 截断后 `filter_files` 找不到文件（如 WeChat 深层 `.pptx`）却被误判为「没有该类型文件」的问题。
+
 ## [0.4.0] — 2026-06-04
 
 ### Added
